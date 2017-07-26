@@ -327,11 +327,16 @@ class LoadCommand(Command):
             file_name = arguments[0]
             with open(os.path.expanduser(file_name), 'r') as script:
                 input = FileInput(script)
+                start = datetime.datetime.now()
                 while True:
                     line = script.readline()
                     if not line:
                         break
                     read_execute_display(line.strip(), input, environment)
+                elapsed = datetime.datetime.now() - start
+                print("Script ran in: %s%.3f%s seconds" % (
+                    colorama.Style.BRIGHT, elapsed.total_seconds(),
+                    colorama.Style.NORMAL))
 
 
 class AssignCommand(Command):
@@ -603,8 +608,9 @@ def main():
                     elif input:
                         print('unknown command or variable: %s' % input)
             except KeyboardInterrupt:
-                break
+                print("Ctrl-D to quit.")
             except EOFError:
+                print("bye.")
                 break
             except:
                 import traceback
