@@ -370,7 +370,7 @@ class LoadCommand(Command):
                 while True:
                     success, result = read_execute_display(input, environment)
                     if not success and not result:
-                        break;
+                        break
                 elapsed = datetime.datetime.now() - start
                 print("Script ran in: %s%.3f%s seconds" % (
                     colorama.Style.BRIGHT, elapsed.total_seconds(),
