@@ -1,9 +1,5 @@
 svr = host http://localhost:8080
 header accept application/json
 dogs = get /dogs
-my_dog = get /dogs/513ad82b-9a6c-4416-a8b8-16d9e4645774
-cat = post /dogs/513ad82b-9a6c-4416-a8b8-16d9e4645774
-{ "breed": "Cat", "name": "Miffy", "imageUrl": "http://i.imgur.com/32232" }
-es = host http://localhost:9200
-get
-env
+select dogs content
+select dogs content.breed
