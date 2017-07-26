@@ -1,23 +1,26 @@
-import requests
+import datetime
 import json
 import os
+import requests
+import sys
+
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+
+import colorama
 
 from prompt_toolkit.shortcuts import prompt
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.contrib.completers import WordCompleter
 
-import colorama
-
 
 commands = {}
 
 
 def command(c):
-    """Decorator that creates an instance of the Command and registers it under
-    its name and aliases."""
+    """Decorator that creates an instance of the decorated Command class and
+    registers it under its name and aliases."""
     instance = c()
     commands[instance.name] = instance
     for alias in instance.aliases:
@@ -183,23 +186,44 @@ class Response(Result):
 
     def __init__(self, resp):
         self.resp = resp
+        self.elapsed = None
 
     def display(self):
-        self._print_status_code()
         self._print_resp_headers()
         if self.is_json():
-            print(json.dumps(self.resp.json(), sort_keys=True, indent=4))
-        else:
+            try:
+                print(json.dumps(self.resp.json(), sort_keys=True, indent=4))
+            except json.decoder.JSONDecodeError:
+                if self.resp.text.strip():
+                    print("could not decode response as JSON: %s" %
+                          self.resp.text)
+        elif self.resp.text.strip():
             print(self.resp.text)
+        self._print_status_code()
+        sys.stdout.write(': ')
+        self._print_content_length(self.resp)
+        sys.stdout.write(' in ')
+        self._print_elapsed_time()
+        sys.stdout.write('\n')
+
+    def _print_content_length(self, resp):
+        sys.stdout.write("%s%s%s bytes" % (
+            colorama.Style.BRIGHT, len(resp.content),
+            colorama.Style.NORMAL))
+
+    def _print_elapsed_time(self):
+        sys.stdout.write("%s%.3f%s seconds" % (
+            colorama.Style.BRIGHT, self.elapsed.total_seconds(),
+            colorama.Style.NORMAL))
 
     def _print_resp_headers(self):
         for key in sorted(self.resp.headers.keys()):
-            print("%s%s: %s%s" % (
-                colorama.Style.BRIGHT, key, self.resp.headers[key],
-                colorama.Style.NORMAL))
+            print("%s%s%s: %s" % (
+                colorama.Style.BRIGHT, key, colorama.Style.NORMAL,
+                self.resp.headers[key]))
 
     def _print_status_code(self):
-        print("%s%s%d%s%s" % (
+        sys.stdout.write("%s%s%d%s%s" % (
             colorama.Style.BRIGHT,
             colorama.Fore.RED if self.resp.status_code > 300
             else colorama.Fore.GREEN,
@@ -220,6 +244,43 @@ class Response(Result):
         return self.resp.json() if self.is_json() else None
 
 
+class Input(ABC):
+
+    @abstractmethod
+    def get(self, prompt_text):
+        pass
+
+    @abstractmethod
+    def display_command(self, command, args):
+        pass
+
+
+class ConsoleInput(Input):
+
+    def __init__(self, history):
+        self.history = history
+
+    def get(self, prompt_text):
+        return prompt(prompt_text, history=self.history)
+
+    def display_command(self, command, args):
+        pass
+
+
+class FileInput(Input):
+
+    def __init__(self, file):
+        self.file = file
+
+    def get(self, prompt_text):
+        return self.file.readline()
+
+    def display_command(self, command, args):
+        print("%s>> %s %s%s" % (
+            colorama.Fore.BLUE, command.name,
+            ' '.join(args), colorama.Fore.RESET))
+
+
 class Command(ABC):
 
     def __init__(self, name, aliases):
@@ -227,8 +288,50 @@ class Command(ABC):
         self.aliases = aliases
 
     @abstractmethod
-    def execute(self, arguments, environment):
+    def execute(self, input, arguments, environment):
         pass
+
+
+@command
+class HelpCommand(Command):
+    """displays help screen."""
+
+    def __init__(self):
+        super().__init__('help', ['?'])
+
+    def execute(self, input, arguments, environment):
+        if arguments:
+            # Lookup help for the specified command
+            command, args = find_command(arguments)
+            if command:
+                print(" %s" % self._format_doc_string(command))
+        else:
+            # Lookup help for all commands
+            for command in sorted(set(commands.values()),
+                    key=lambda x: x.name):
+                print(" %s" % self._format_doc_string(command))
+
+    def _format_doc_string(self, command):
+            return "%-7s - %s" % (command.name, command.__doc__)
+
+
+@command
+class LoadCommand(Command):
+    """loads a file and executes commands from it."""
+
+    def __init__(self):
+        super().__init__('load', [])
+
+    def execute(self, _, arguments, environment):
+        if arguments:
+            file_name = arguments[0]
+            with open(os.path.expanduser(file_name), 'r') as script:
+                input = FileInput(script)
+                while True:
+                    line = script.readline()
+                    if not line:
+                        break
+                    read_execute_display(line.strip(), input, environment)
 
 
 class AssignCommand(Command):
@@ -238,8 +341,8 @@ class AssignCommand(Command):
         self.var_name = var_name
         self.command = command
 
-    def execute(self, arguments, env):
-        result = self.command.execute(arguments, env)
+    def execute(self, input, arguments, env):
+        result = self.command.execute(input, arguments, env)
         env.variables[self.var_name] = result
         return result
 
@@ -250,22 +353,42 @@ class HttpCommand(Command):
         super().__init__(name, aliases)
         self.method = method
 
-    def execute(self, arguments, env):
+    def execute(self, input, arguments, env):
         if env.host:
-            return Response(requests.request(
+            start = datetime.datetime.now()
+            resp = Response(requests.request(
                     self.method,
                     env.host + arguments[0],
                     headers=env.headers,
-                    json=self.get_payload()))
+                    json=self.get_payload(input, env)))
+            resp.elapsed = datetime.datetime.now() - start
+            return resp
         else:
             return TextResult('please specify a host.')
 
-    def get_payload(self):
+    def get_payload(self, input, env):
         return None
 
 
 @command
+class HeadCommand(HttpCommand):
+    """sends a HEAD request using the current value of host and headers."""
+
+    def __init__(self):
+        super().__init__('head', [], 'head')
+
+
+@command
+class OptionsCommand(HttpCommand):
+    """sends a OPTIONS request using the current value of host and headers."""
+
+    def __init__(self):
+        super().__init__('options', ['opt'], 'options')
+
+
+@command
 class GetCommand(HttpCommand):
+    """sends a GET request using the current value of host and headers."""
 
     def __init__(self):
         super().__init__('get', ['g'], 'get')
@@ -276,16 +399,15 @@ class PayloadCommand(HttpCommand):
     def __init__(self, name, aliases, method):
         super().__init__(name, aliases, 'put')
 
-    def get_payload(self):
-        payload = prompt(
-                'Enter Payload: ',
-                history=self.env.hist.payload_history.get())
+    def get_payload(self, input, env):
+        payload = input.get('Enter Payload: ')
         json_payload = json.loads(payload)
         return json_payload
 
 
 @command
 class PutCommand(PayloadCommand):
+    """sends a PUT request using the current value of host and headers."""
 
     def __init__(self):
         super().__init__('put', ['pu'], 'get')
@@ -293,13 +415,23 @@ class PutCommand(PayloadCommand):
 
 @command
 class PostCommand(PayloadCommand):
+    """sends a POST request using the current value of host and headers."""
 
     def __init__(self):
         super().__init__('post', ['po'], 'post')
 
 
 @command
+class PatchCommand(PayloadCommand):
+    """sends a PATCH request using the current value of host and headers."""
+
+    def __init__(self):
+        super().__init__('patch', ['pat'], 'patch')
+
+
+@command
 class DeleteCommand(HttpCommand):
+    """sends a DELETE request using the current value of host and headers."""
 
     def __init__(self):
         super().__init__('delete', ['del'], 'delete')
@@ -307,11 +439,12 @@ class DeleteCommand(HttpCommand):
 
 @command
 class HeadersCommand(Command):
+    """shows the current list of headers."""
 
     def __init__(self):
         super().__init__('headers', ['hs'])
 
-    def execute(self, args, env):
+    def execute(self, input, args, env):
         if len(args) == 0:
             return TextResult(self._get_headers(env))
         else:
@@ -329,16 +462,16 @@ class HeadersCommand(Command):
 
 @command
 class HeaderCommand(Command):
-    """Sets or displays the value of a header."""
+    """sets or displays the value of a header."""
 
     def __init__(self):
         super().__init__('header', ['hd'])
 
-    def execute(self, args, env):
+    def execute(self, input, args, env):
         if len(args) == 1:
             try:
                 return TextResult(env.headers[args[0]])
-            except Exception as ex:
+            except Exception:
                 return TextResult("unknown header: %s" % args[0])
         elif len(args) == 2:
             env.headers[args[0]] = args[1]
@@ -349,12 +482,12 @@ class HeaderCommand(Command):
 
 @command
 class TypeCommand(Command):
-    """displays the type of a variable"""
+    """displays the type of a variable."""
 
     def __init__(self):
         super().__init__('type', ['t'])
 
-    def execute(self, args, env):
+    def execute(self, input, args, env):
         if args[0] in env.variables:
             return TextResult(env.variables[args[0]].type())
         else:
@@ -363,12 +496,12 @@ class TypeCommand(Command):
 
 @command
 class LinksCommand(Command):
-    """Prints links found in a JSON response."""
+    """prints links found in a JSON response."""
 
     def __init__(self):
         super().__init__('links', [])
 
-    def execute(self, args, env):
+    def execute(self, input, args, env):
         if args[0] in env.variables:
             value = env.variables[args[0]]
             if value.type() == Response.TYPE:
@@ -385,12 +518,12 @@ class LinksCommand(Command):
 
 @command
 class EnvCommand(Command):
-    """Displays the environment."""
+    """displays the environment."""
 
     def __init__(self):
         super().__init__('env', [])
 
-    def execute(self, args, env):
+    def execute(self, input, args, env):
         return TextResult(
                 ('host: %s\n' % (env.host or '')) +
                 ('headers:\n' +
@@ -401,12 +534,12 @@ class EnvCommand(Command):
 
 @command
 class HostCommand(Command):
-    "Displays or sets the current host."""
+    "displays or sets the current host."""
 
     def __init__(self):
         super().__init__('host', ['h'])
 
-    def execute(self, args, env):
+    def execute(self, input, args, env):
         if len(args) == 1:
             env.host = self._get_host(args[0])
             return HostResult(env.host)
@@ -424,23 +557,48 @@ class HostCommand(Command):
         return host
 
 
+def read_command(line):
+    """Reads a command from a string and returns it."""
+    if line.strip():
+        return find_command(line.split(' '))
+    else:
+        return None, line
+
+
+def execute_command(command, input, args, env):
+    """Executes a command in an environment."""
+    return command.execute(input, args, env)
+
+
+def display_command_result(result):
+    result.display()
+
+
+def read_execute_display(line, input, env):
+    command, args = read_command(line)
+    if command:
+        input.display_command(command, args)
+        result = execute_command(command, input, args, env)
+        if result:
+            display_command_result(result)
+        return True
+    else:
+        return False
+
+
 def main():
     colorama.init()
     with history() as hist:
         env = Environment(hist)
+        console = ConsoleInput(env.history.command_history.get())
         while True:
             try:
                 input = prompt('-> ',
                                history=env.history.command_history.get(),
                                auto_suggest=AutoSuggestFromHistory()).strip()
-                if input:
+                if not read_execute_display(input, console, env):
                     tokens = input.split(' ')
-                    command, args = find_command(tokens)
-                    if command:
-                        result = command.execute(args, env)
-                        if result:
-                            result.display()
-                    elif len(tokens) == 1 and tokens[0] in env.variables:
+                    if len(tokens) == 1 and tokens[0] in env.variables:
                         env.variables[tokens[0]].display()
                     elif input:
                         print('unknown command or variable: %s' % input)
