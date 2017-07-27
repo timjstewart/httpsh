@@ -296,20 +296,30 @@ class HelpCommand(Command):
             # Lookup help for the specified command
             command, args = find_command(arguments)
             if command:
-                print(" %s" % self._format_doc_string(command))
+                print("%s" % self._format_doc_string_long(command))
         else:
             # Lookup help for all commands
             for command in sorted(set(commands.values()),
                                   key=lambda x: x.name):
-                print(" %s" % self._format_doc_string(command))
+                print(" %s" % self._format_doc_string_short(command))
 
-    def _format_doc_string(self, command):
-            return "%-7s - %s" % (command.name, command.__doc__)
+    def _format_doc_string_short(self, command):
+            return "%-7s - %s" % (
+                    command.name, command.__doc__.split('\n')[0])
+
+    def _format_doc_string_long(self, command):
+            return "%s - %s" % (command.name, command.__doc__)
 
 
 @command
 class LoadCommand(Command):
-    """loads a file and evaluates commands from it."""
+    """loads a file and evaluates commands from it.
+
+For example:
+
+    -> load script
+    -> load ~/script
+    """
 
     def __init__(self):
         super().__init__('load', [])
@@ -345,7 +355,15 @@ class AssignCommand(Command):
 
 @command
 class RepeatCommand(Command):
-    """repeats a command n times and prints average time."""
+    """repeats a command n times and prints average time.
+
+There is no delay between repetitions.
+
+For example:
+
+    -> repeat 100 get /customers
+    -> repeat 10 load script
+    """
 
     def __init__(self):
         super().__init__('repeat', [])
@@ -368,25 +386,36 @@ class RepeatCommand(Command):
 
 @command
 class SelectCommand(Command):
-    """selects a sub-tree of a JSON response."""
+    """selects a sub-tree of a JSON response.
+
+For example:
+
+    -> select resp
+    -> select resp content
+    -> select resp content._links.href
+    -> select resp content.*Name
+    """
 
     def __init__(self):
         super().__init__('select', [])
 
     def evaluate(self, input, arguments, env):
-        if len(arguments) == 2:
+        if arguments:
             if (arguments[0] in env.variables and
                     env.variables[arguments[0]].type() == Response.TYPE):
                 resp = env.variables[arguments[0]]
                 if resp.is_json():
-                    return self._select(resp, arguments[1])
+                    if len(arguments) == 2:
+                        return self._select(resp, arguments[1])
+                    else:
+                        return resp
                 else:
                     return StringValue("response is not JSON.")
             else:
                 return StringValue("no HTTP response by that name: %s" %
                                    arguments[0])
         else:
-            return StringValue("usage select RESPONSE SELECT_STATEMENT")
+            return StringValue("usage select RESPONSE [SELECT_STATEMENT]")
 
     def _select(self, resp, select_stmt):
         parts = select_stmt.split('.')
@@ -450,7 +479,12 @@ class HttpCommand(Command):
 
 @command
 class HeadCommand(HttpCommand):
-    """sends a HEAD request using the current value of host and headers."""
+    """sends a HEAD request using the current value of host and headers.
+
+For example:
+
+    -> head /customers
+    """
 
     def __init__(self):
         super().__init__('head', ['HEAD'], 'head')
@@ -458,7 +492,12 @@ class HeadCommand(HttpCommand):
 
 @command
 class OptionsCommand(HttpCommand):
-    """sends a OPTIONS request using the current value of host and headers."""
+    """sends a OPTIONS request using the current value of host and headers.
+
+For example:
+
+    -> options /customers
+    """
 
     def __init__(self):
         super().__init__('options', ['OPTIONS', 'opt'], 'options')
@@ -466,7 +505,12 @@ class OptionsCommand(HttpCommand):
 
 @command
 class GetCommand(HttpCommand):
-    """sends a GET request using the current value of host and headers."""
+    """sends a GET request using the current value of host and headers.
+
+For example:
+
+    -> get /customers
+    """
 
     def __init__(self):
         super().__init__('get', ['GET', 'g'], 'get')
@@ -485,7 +529,12 @@ class PayloadCommand(HttpCommand):
 
 @command
 class PutCommand(PayloadCommand):
-    """sends a PUT request using the current value of host and headers."""
+    """sends a PUT request using the current value of host and headers.
+
+For example:
+
+    -> put /customers
+    """
 
     def __init__(self):
         super().__init__('put', ['PUT', 'pu'], 'put')
@@ -493,7 +542,12 @@ class PutCommand(PayloadCommand):
 
 @command
 class PostCommand(PayloadCommand):
-    """sends a POST request using the current value of host and headers."""
+    """sends a POST request using the current value of host and headers.
+
+For example:
+
+    -> post /customers
+    """
 
     def __init__(self):
         super().__init__('post', ['POST', 'po'], 'post')
@@ -501,7 +555,15 @@ class PostCommand(PayloadCommand):
 
 @command
 class GetWithPayloadCommand(PayloadCommand):
-    """sends a GET request with a payload."""
+    """sends a GET request with a payload.
+
+For example:
+
+    -> getp /customers
+
+Note: If you're wondering who would ever have a service where a GET request
+sent a payload, check out ElasticSearch.
+    """
 
     def __init__(self):
         super().__init__('getp', ['GETP', 'gp'], 'get')
@@ -509,7 +571,12 @@ class GetWithPayloadCommand(PayloadCommand):
 
 @command
 class PatchCommand(PayloadCommand):
-    """sends a PATCH request using the current value of host and headers."""
+    """sends a PATCH request using the current value of host and headers.
+
+For example:
+
+    -> patch /customers
+    """
 
     def __init__(self):
         super().__init__('patch', ['pat'], 'patch')
@@ -517,7 +584,12 @@ class PatchCommand(PayloadCommand):
 
 @command
 class DeleteCommand(HttpCommand):
-    """sends a DELETE request using the current value of host and headers."""
+    """sends a DELETE request using the current value of host and headers.
+
+For example:
+
+    -> delete /customers
+    """
 
     def __init__(self):
         super().__init__('delete', ['del'], 'delete')
@@ -579,7 +651,13 @@ class HostsCommand(Command):
 
 @command
 class HeaderCommand(Command):
-    """sets or displays the value of a header."""
+    """sets or displays the value of a header.
+
+For example:
+
+    -> header
+    -> header accept application/json
+    """
 
     def __init__(self):
         super().__init__('header', ['hd'])
@@ -614,28 +692,6 @@ class TypeCommand(Command):
 
 
 @command
-class LinksCommand(Command):
-    """prints links found in a JSON response."""
-
-    def __init__(self):
-        super().__init__('links', [])
-
-    def evaluate(self, input, args, env):
-        if args[0] in env.variables:
-            value = env.variables[args[0]]
-            if value.type() == Response.TYPE:
-                return StringValue('\n'.join(self._get_links(value)))
-        else:
-            return StringValue("unknown variable: %s" % args[0])
-
-    def _get_links(self, resp):
-        if resp.is_json():
-            if '_links' in resp.json():
-                for key in resp.json()['_links'].keys():
-                    yield '%s: %s' % (key, resp.json()['_links'][key])
-
-
-@command
 class EnvCommand(Command):
     """displays the environment."""
 
@@ -659,7 +715,12 @@ class EnvCommand(Command):
 
 @command
 class RemoveCommand(Command):
-    """removes a variable from the environment."""
+    """removes a variable from the environment.
+
+For example:
+
+    -> rm host1
+    """
 
     def __init__(self):
         super().__init__('remove', ['rm'])
@@ -675,7 +736,15 @@ class RemoveCommand(Command):
 
 @command
 class VarsCommand(Command):
-    """displays the variables in the environment."""
+    """displays the variables in the environment.
+
+Aliased as ls.
+
+For example:
+
+    -> vars
+    -> ls
+    """
 
     def __init__(self):
         super().__init__('vars', ['ls'])
@@ -693,7 +762,14 @@ class VarsCommand(Command):
 
 @command
 class HostCommand(Command):
-    "displays or sets the current host."""
+    """displays or sets the current host.
+
+For example:
+
+    -> host
+    -> host https://api.coffeeshop.com
+    -> host api.barbershop.com
+    """
 
     def __init__(self):
         super().__init__('host', ['h'])
