@@ -390,10 +390,24 @@ class SelectCommand(Command):
 
 For example:
 
+    display all of the JSON in the response.
     -> select resp
+
+    display only the content node of the JSON response.
     -> select resp content
+
+    display only the href node of each item in content._links.
     -> select resp content._links.href
+
+    display all properties ending in Name
     -> select resp content.*Name
+
+    display only the firstName and lastName properties
+    -> select resp content.firstName,lastName
+
+    display all properties ending in Name and include the value
+    of content's totalPages property.
+    -> select resp content(totalPages).*Name
     """
 
     def __init__(self):
