@@ -428,7 +428,7 @@ For example:
         characters.  Each expression attempts to traverse deeper into the
         supplied JSON."""
         parts = select_stmt.split('.')
-        result = self._select_part(resp.json(), parts[0], parts[1:])
+        result = self._select_part(resp.json(), parts[0], parts[1:], [], {})
         return StringValue(pretty_json(result))
 
     def _matches(self, pattern, string):
@@ -451,21 +451,42 @@ For example:
         else:
             results.append(item)
 
-    def _select_part(self, node, part, parts):
+    def _parse_expression(self, expression):
+        m = re.match('([^(]*)(\\(([^)]*)\\))?', expression)
+        pattern = m.group(1)
+        collect = m.group(3).split(',') if m.group(3) else []
+        print("PATTERN:", pattern, "COLLECT:", collect)
+        return pattern, collect
+
+    def _merge_dicts(self, collected, selected):
+            collected.update(selected)
+            return collected
+
+    def _select_part(self, node, part, parts, collect_here, collected):
+        pattern, collect = self._parse_expression(part)
         if type(node) == dict:
+            collected.update(
+                    {key: node[key]
+                     for c in collect_here
+                     for key in self._get_matching_keys(node, c)})
             if parts:
                 return {key: self._select_part(
-                        node[key], parts[0], parts[1:])
-                        for key in self._get_matching_keys(node, part)}
+                        node[key], parts[0], parts[1:], collect, collected)
+                        for key in self._get_matching_keys(node, pattern)}
             else:
-                return {key: node[key]
-                        for key in self._get_matching_keys(node, part)}
+                return self._merge_dicts(
+                        collected,
+                        {key: node[key]
+                         for key in self._get_matching_keys(node, pattern)})
         elif type(node) == list:
-            return [self._select_part(item, part, parts)
+            return [self._select_part(item, pattern,
+                                      parts, collect_here, collected)
                     for item in node]
-        elif not parts:
+        elif not parts and pattern == '*':
             return node
         else:
+            # There are still more expressions in parts but we have navigated
+            # as deeply into the JSON as possible.  The selection has failed.
             return None
 
 
