@@ -453,18 +453,20 @@ For example:
 
     def _select_part(self, node, part, parts):
         if type(node) == dict:
-            result = {}
-            for key in self._get_matching_keys(node, part):
-                if parts:
-                    result[key] = self._select_part(
-                            node[key], parts[0], parts[1:])
-                else:
-                    result[key] = node[key]
-            return result
+            if parts:
+                return {key: self._select_part(
+                        node[key], parts[0], parts[1:])
+                        for key in self._get_matching_keys(node, part)}
+            else:
+                return {key: node[key]
+                        for key in self._get_matching_keys(node, part)}
         elif type(node) == list:
             return [self._select_part(item, part, parts)
                     for item in node]
-        return []
+        elif not parts:
+            return node
+        else:
+            return None
 
 
 class HttpCommand(Command):
