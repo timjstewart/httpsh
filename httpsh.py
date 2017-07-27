@@ -401,9 +401,13 @@ For example:
 
     def evaluate(self, input, arguments, env):
         if arguments:
+            # find the variable we're running select on and make sure it's
+            # a Response.  You can't run select on a Host.
             if (arguments[0] in env.variables and
                     env.variables[arguments[0]].type() == Response.TYPE):
                 resp = env.variables[arguments[0]]
+                # make sure that the Response contains JSON.  You can't run
+                # select on an HTML or XML document.
                 if resp.is_json():
                     if len(arguments) == 2:
                         return self._select(resp, arguments[1])
@@ -418,18 +422,28 @@ For example:
             return StringValue("usage select RESPONSE [SELECT_STATEMENT]")
 
     def _select(self, resp, select_stmt):
+        """runs the select statement on a Response with a JSON payload.
+
+        A select statement is a chain of expressions separated by period
+        characters.  Each expression attempts to traverse deeper into the
+        supplied JSON."""
         parts = select_stmt.split('.')
         result = self._select_part(resp.json(), parts[0], parts[1:])
         return StringValue(pretty_json(result))
 
     def _matches(self, pattern, string):
+        """determines if the pattern from the select statement matches a
+        particular string.  The patterns currently only support one special
+        character, the asterisk, which acts like a '.*' in the language of
+        regular expressions."""
         regex_pattern = pattern.replace('*', '.*')
         return re.match(regex_pattern, string)
 
-    def _get_matching_keys(self, node, part):
+    def _get_matching_keys(self, node, pattern):
+        """returns all keys in a dictionary that match the given pattern."""
         if type(node) == dict:
             return [key for key in node.keys()
-                    if self._matches(part, key)]
+                    if self._matches(pattern, key)]
 
     def _append(self, results, item):
         if type(item) == list:
@@ -438,18 +452,19 @@ For example:
             results.append(item)
 
     def _select_part(self, node, part, parts):
-        results = []
         if type(node) == dict:
+            result = {}
             for key in self._get_matching_keys(node, part):
                 if parts:
-                    self._append(results, self._select_part(
-                            node[key], parts[0], parts[1:]))
+                    result[key] = self._select_part(
+                            node[key], parts[0], parts[1:])
                 else:
-                    self._append(results, node[key])
+                    result[key] = node[key]
+            return result
         elif type(node) == list:
-            self._append(results, [self._select_part(item, part, parts)
-                         for item in node])
-        return results[0] if len(results) == 1 else results
+            return [self._select_part(item, part, parts)
+                    for item in node]
+        return []
 
 
 class HttpCommand(Command):
