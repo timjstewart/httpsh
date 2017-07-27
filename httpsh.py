@@ -428,7 +428,13 @@ For example:
         characters.  Each expression attempts to traverse deeper into the
         supplied JSON."""
         parts = select_stmt.split('.')
-        result = self._select_part(resp.json(), parts[0], parts[1:], [], {})
+        patterns, collect = self._parse_expression(parts[0])
+        if not patterns and collect and len(parts) >= 2:
+            result = self._select_part(
+                    resp.json(), parts[1], parts[2:], collect, {})
+        else:
+            result = self._select_part(
+                    resp.json(), parts[0], parts[1:], [], {})
         return StringValue(pretty_json(result))
 
     def _matches(self, pattern, string):
@@ -453,17 +459,18 @@ For example:
 
     def _parse_expression(self, expression):
         m = re.match('([^(]*)(\\(([^)]*)\\))?', expression)
-        pattern = m.group(1)
-        collect = m.group(3).split(',') if m.group(3) else []
-        print("PATTERN:", pattern, "COLLECT:", collect)
-        return pattern, collect
+        patterns = [pattern for pattern in m.group(1).split(',')
+                    if pattern.strip()]
+        collect = ([item for item in m.group(3).split(',') if item.strip()]
+                   if m.group(3) else [])
+        return patterns, collect
 
     def _merge_dicts(self, collected, selected):
             collected.update(selected)
             return collected
 
     def _select_part(self, node, part, parts, collect_here, collected):
-        pattern, collect = self._parse_expression(part)
+        patterns, collect = self._parse_expression(part)
         if type(node) == dict:
             collected.update(
                     {key: node[key]
@@ -472,17 +479,20 @@ For example:
             if parts:
                 return {key: self._select_part(
                         node[key], parts[0], parts[1:], collect, collected)
+                        for pattern in patterns
                         for key in self._get_matching_keys(node, pattern)}
             else:
                 return self._merge_dicts(
                         collected,
                         {key: node[key]
+                         for pattern in patterns
                          for key in self._get_matching_keys(node, pattern)})
         elif type(node) == list:
             return [self._select_part(item, pattern,
                                       parts, collect_here, collected)
+                    for pattern in patterns
                     for item in node]
-        elif not parts and pattern == '*':
+        elif not parts and patterns == ['*']:
             return node
         else:
             # There are still more expressions in parts but we have navigated
