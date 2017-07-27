@@ -1,0 +1,2 @@
+es = host http://localhost:9200
+get /objective2/objective/_search?q=book_title:Lial | hits.hits._source

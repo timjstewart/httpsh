@@ -408,30 +408,37 @@ For example:
     display all properties ending in Name and include the value
     of content's totalPages property.
     -> select resp content(totalPages).*Name
+
+    display all properties ending in Name and include the value
+    of the root JSON node's totalPages property.
+    -> select resp (totalPages).*Name
     """
 
     def __init__(self):
         super().__init__('select', [])
 
-    def evaluate(self, input, arguments, env):
+    def _get_resp(self, arguments, env):
         if arguments:
-            # find the variable we're running select on and make sure it's
-            # a Response.  You can't run select on a Host.
-            if (arguments[0] in env.variables and
-                    env.variables[arguments[0]].type() == Response.TYPE):
-                resp = env.variables[arguments[0]]
-                # make sure that the Response contains JSON.  You can't run
-                # select on an HTML or XML document.
-                if resp.is_json():
-                    if len(arguments) == 2:
-                        return self._select(resp, arguments[1])
-                    else:
-                        return resp
+            arg = arguments[0]
+            if type(arg) == Response and arg.type() == Response.TYPE:
+                return arg
+            elif (type(arg) == str and arg in env.variables and
+                    env.variables[arg].type() == Response.TYPE):
+                return env.variables[arg]
+        raise ValueError('could not get Response from arguments')
+
+    def evaluate(self, input, arguments, env):
+        resp = self._get_resp(arguments, env)
+        if resp:
+            # make sure that the Response contains JSON.  You can't run
+            # select on an HTML or XML document.
+            if resp.is_json():
+                if len(arguments) == 2:
+                    return self._select(resp, arguments[1])
                 else:
-                    return StringValue("response is not JSON.")
+                    return resp
             else:
-                return StringValue("no HTTP response by that name: %s" %
-                                   arguments[0])
+                return StringValue("response is not JSON.")
         else:
             return StringValue("usage select RESPONSE [SELECT_STATEMENT]")
 
@@ -443,13 +450,16 @@ For example:
         supplied JSON."""
         parts = select_stmt.split('.')
         patterns, collect = self._parse_expression(parts[0])
-        if not patterns and collect and len(parts) >= 2:
-            result = self._select_part(
-                    resp.json(), parts[1], parts[2:], collect, {})
-        else:
-            result = self._select_part(
-                    resp.json(), parts[0], parts[1:], [], {})
-        return StringValue(pretty_json(result))
+        try:
+            if not patterns and collect and len(parts) >= 2:
+                result = self._select_part(
+                        resp.json(), parts[1], parts[2:], collect, {})
+            else:
+                result = self._select_part(
+                        resp.json(), parts[0], parts[1:], [], {})
+            return StringValue(pretty_json(result))
+        except KeyError as ex:
+            print('select failed (%s)' % ex)
 
     def _matches(self, pattern, string):
         """determines if the pattern from the select statement matches a
@@ -483,6 +493,12 @@ For example:
             collected.update(selected)
             return collected
 
+    def _verify_result(self, result):
+        if not result:
+            raise KeyError('could not traverse any deeper into JSON.')
+        else:
+            return result
+
     def _select_part(self, node, part, parts, collect_here, collected):
         patterns, collect = self._parse_expression(part)
         if type(node) == dict:
@@ -491,27 +507,30 @@ For example:
                      for c in collect_here
                      for key in self._get_matching_keys(node, c)})
             if parts:
-                return {key: self._select_part(
-                        node[key], parts[0], parts[1:], collect, collected)
-                        for pattern in patterns
-                        for key in self._get_matching_keys(node, pattern)}
-            else:
-                return self._merge_dicts(
-                        collected,
-                        {key: node[key]
+                return self._verify_result(
+                        {key: self._select_part(
+                           node[key], parts[0], parts[1:], collect, collected)
                          for pattern in patterns
                          for key in self._get_matching_keys(node, pattern)})
+            else:
+                return self._merge_dicts(
+                            collected,
+                            self._verify_result(
+                                {key: node[key]
+                                 for pattern in patterns
+                                 for key in self._get_matching_keys(
+                                     node, pattern)}))
         elif type(node) == list:
-            return [self._select_part(item, pattern,
+            return [self._select_part(item, ','.join(patterns),
                                       parts, collect_here, collected)
-                    for pattern in patterns
                     for item in node]
         elif not parts and patterns == ['*']:
             return node
         else:
             # There are still more expressions in parts but we have navigated
             # as deeply into the JSON as possible.  The selection has failed.
-            return None
+            raise KeyError(('could not traverse any deeper into JSON ' +
+                           ('(part=%s, parts=%s)' % (part, parts))))
 
 
 class HttpCommand(Command):
@@ -531,7 +550,13 @@ class HttpCommand(Command):
                     headers=env.host.headers,
                     json=self.get_payload(input, env)))
             resp.elapsed = datetime.datetime.now() - start
-            return resp
+
+            if len(arguments) > 2 and arguments[1] == '|':
+                select_stmt = arguments[2]
+                return commands['select'].evaluate(
+                        input, [resp, select_stmt], env)
+            else:
+                return resp
         else:
             return StringValue('please specify a host.')
 
