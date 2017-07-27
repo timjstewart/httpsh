@@ -1,5 +1,5 @@
 svr = host http://localhost:8080
 header accept application/json
-dogs = get /dogs
+dogs = get /dogs?breed=Pug
 select dogs content
 select dogs content.breed

@@ -1,6 +1,7 @@
 import datetime
 import json
 import os
+import re
 import requests
 import statistics
 import sys
@@ -389,25 +390,37 @@ class SelectCommand(Command):
 
     def _select(self, resp, select_stmt):
         parts = select_stmt.split('.')
-        result = self._select_part(resp.json(), '', parts[0], parts[1:])
+        result = self._select_part(resp.json(), parts[0], parts[1:])
         return StringValue(pretty_json(result))
 
-    def _select_part(self, node, path, part, parts):
+    def _matches(self, pattern, string):
+        regex_pattern = pattern.replace('*', '.*')
+        return re.match(regex_pattern, string)
+
+    def _get_matching_keys(self, node, part):
         if type(node) == dict:
-            if part in node:
+            return [key for key in node.keys()
+                    if self._matches(part, key)]
+
+    def _append(self, results, item):
+        if type(item) == list:
+            results.extend(item)
+        else:
+            results.append(item)
+
+    def _select_part(self, node, part, parts):
+        results = []
+        if type(node) == dict:
+            for key in self._get_matching_keys(node, part):
                 if parts:
-                    return self._select_part(
-                            node[part], path + '.' + part,
-                            parts[0], parts[1:])
+                    self._append(results, self._select_part(
+                            node[key], parts[0], parts[1:]))
                 else:
-                    return node[part]
+                    self._append(results, node[key])
         elif type(node) == list:
-            results = []
-            for item in node:
-                results.append(self._select_part(item, path, part, parts))
-            return results
-        elif parts:
-            return []
+            self._append(results, [self._select_part(item, part, parts)
+                         for item in node])
+        return results[0] if len(results) == 1 else results
 
 
 class HttpCommand(Command):
