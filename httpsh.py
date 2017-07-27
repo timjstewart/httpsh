@@ -74,6 +74,22 @@ class Environment(object):
         self.history = history
         self.variables = {}
 
+    def bind(self, var_name, value):
+        if value:
+            self.variables[var_name] = value
+        else:
+            self.variables.pop(var_name, None)
+        return value
+
+    def lookup(self, var_name, var_type=None):
+        if var_name not in self.variables:
+            raise KeyError('no variable named: %s' % var_name)
+        var = self.variables[var_name]
+        if var_type and var.type() != var_type:
+            raise ValueError('variable: %s has type: %s not %s' % (
+                var_name, var.type(), var_type))
+        return var
+
 
 class History(object):
     """Group all history objects together."""
@@ -107,7 +123,8 @@ class HostValue(Value):
 
     TYPE = 'host'
 
-    def __init__(self, hostname):
+    def __init__(self, alias, hostname):
+        self.alias = alias
         self.hostname = hostname
         self.headers = {}
 
@@ -148,7 +165,7 @@ class StringValue(Value):
 
     def display(self):
         if self.text:
-            print(color(bold(self.text)))
+            print(self.text)
 
     def type(self):
         return 'text'
@@ -262,10 +279,12 @@ class FileIO(IO):
         self.file = file
 
     def get_command(self, prompt_text):
-        return self.file.readline().strip()
+        line = self.file.readline()
+        return line.strip() if line else None
 
     def get_payload(self, prompt_text):
-        return self.file.readline().strip()
+        line = self.file.readline()
+        return line.strip() if line else None
 
     def display_command(self, command, args):
         print("%s>> %s %s%s" % (
@@ -282,6 +301,9 @@ class Command(ABC):
     @abstractmethod
     def evaluate(self, input, arguments, environment):
         pass
+
+    def is_assignable(self):
+        return False
 
 
 @command
@@ -304,11 +326,14 @@ class HelpCommand(Command):
                 print(" %s" % self._format_doc_string_short(command))
 
     def _format_doc_string_short(self, command):
-            return "%-7s - %s" % (
-                    command.name, command.__doc__.split('\n')[0])
+        return "%-7s - %s" % (
+                command.name, command.__doc__.split('\n')[0])
 
     def _format_doc_string_long(self, command):
-            return "%s - %s" % (command.name, command.__doc__)
+        doc = "%s - %s" % (command.name, command.__doc__)
+        if command.aliases:
+            doc += '\nAliases: %s' % ', '.join(command.aliases)
+        return doc
 
 
 @command
@@ -322,7 +347,7 @@ For example:
     """
 
     def __init__(self):
-        super().__init__('load', [])
+        super().__init__('load', ['.', 'source', 'run'])
 
     def evaluate(self, _, arguments, environment):
         if arguments:
@@ -348,8 +373,12 @@ class AssignCommand(Command):
         self.command = command
 
     def evaluate(self, input, arguments, env):
-        result = self.command.evaluate(input, arguments, env)
-        env.variables[self.var_name] = result
+        if self.command.is_assignable():
+            result = self.command.evaluate(input, arguments, env)
+            env.bind(self.var_name, result)
+        else:
+            raise ValueError('%s commands are not assignable' %
+                             self.command.name)
         return NullValue()
 
 
@@ -376,7 +405,8 @@ For example:
             for _ in range(0, repetitions):
                 start = datetime.datetime.now()
                 result = command.evaluate(input, cmd_args, env)
-                print_command_result(result)
+                if result:
+                    print_command_result(result)
                 times.append((datetime.datetime.now() - start)
                              .total_seconds())
             return StringValue(
@@ -422,9 +452,8 @@ For example:
             arg = arguments[0]
             if type(arg) == Response and arg.type() == Response.TYPE:
                 return arg
-            elif (type(arg) == str and arg in env.variables and
-                    env.variables[arg].type() == Response.TYPE):
-                return env.variables[arg]
+            elif type(arg) == str:
+                return env.lookup(arg, Response.TYPE)
         raise ValueError('could not get Response from arguments')
 
     def evaluate(self, input, arguments, env):
@@ -539,6 +568,9 @@ class HttpCommand(Command):
         super().__init__(name, aliases)
         self.method = method
 
+    def is_assignable(self):
+        return True
+
     def evaluate(self, input, arguments, env):
         if env.host:
             path = (arguments[0] if arguments else '/')
@@ -552,6 +584,7 @@ class HttpCommand(Command):
             resp.elapsed = datetime.datetime.now() - start
 
             if len(arguments) > 2 and arguments[1] == '|':
+                # filter the HTTP response through a select statement
                 select_stmt = arguments[2]
                 return commands['select'].evaluate(
                         input, [resp, select_stmt], env)
@@ -712,7 +745,9 @@ class HeadersCommand(Command):
 
 @command
 class HostsCommand(Command):
-    """shows the current list of hosts."""
+    """shows the current list of hosts.
+
+    The current host is prefixed by an asterisk."""
 
     def __init__(self):
         super().__init__('hosts', [])
@@ -723,17 +758,16 @@ class HostsCommand(Command):
         else:
             return StringValue('hosts has no arguments')
 
-    def _format_host(self, var_name, host):
-        return ("%s: %s" % (var_name, host.hostname))
+    def _format_host(self, var_name, host, current_host):
+        return ("%s%s: %s" % ('*' if host == current_host else ' ',
+                              var_name, host.hostname))
 
     def _get_hosts(self, env):
-        if env.host:
-            return '\n'.join(
-                    self._format_host(var_name, env.variables[var_name])
-                    for var_name in sorted(env.variables.keys())
-                    if env.variables[var_name].type() == HostValue.TYPE)
-        else:
-            return ''
+        return '\n'.join(
+                self._format_host(
+                    var_name, env.variables[var_name], env.host)
+                for var_name in sorted(env.variables.keys())
+                if env.variables[var_name].type() == HostValue.TYPE)
 
 
 @command
@@ -772,10 +806,13 @@ class TypeCommand(Command):
         super().__init__('type', ['t'])
 
     def evaluate(self, input, args, env):
-        if args[0] in env.variables:
-            return StringValue(env.variables[args[0]].type())
+        if args:
+            try:
+                return StringValue(env.lookup(args[0]).type())
+            except KeyError:
+                return StringValue("unknown variable: %s" % args[0])
         else:
-            return StringValue("unknown variable: %s" % args[0])
+            return StringValue("usage: type VAR")
 
 
 @command
@@ -787,16 +824,24 @@ class EnvCommand(Command):
 
     def evaluate(self, input, args, env):
         result = ''
-        result += 'host: %s\n' % (env.host.hostname if env.host else '')
-        result += 'headers:\n%s' % (''.join('  %s: %s\n' % (k, v) for k, v
-                                    in env.host.headers.items())
-                                    if env.host else '')
-        result += 'variables:\n%s' % ('\n'.join(
-            ("  %s = %s { %s }" % (
-                name,
-                env.variables[name].type(),
-                env.variables[name].summary())
-                for name in env.variables.keys())))
+        # Add host
+        result += bold('host: ')
+        if env.host:
+            result += '%s (%s)' % (env.host.hostname, env.host.alias)
+        result += '\n'
+        # Add headers
+        result += bold('headers:')
+        if env.host:
+            for h, v in env.host.headers.items():
+                result += '\n  %s: %s' % (h, v)
+        result += '\n'
+        # Add variables
+        result += bold('variables:')
+        for k, v in env.variables.items():
+            result += "\n  %s = %s { %s }" % (
+                k,
+                env.variables[k].type(),
+                env.variables[k].summary())
         return StringValue(result)
 
 
@@ -816,6 +861,8 @@ For example:
         if len(args) != 1:
             return StringValue('usage remove VARNAME')
         result = env.variables.pop(args[0], None)
+        if result == env.host:
+            env.host = None
         if not result:
             return StringValue('no variable named: %s' % args[0])
         return NullValue()
@@ -839,11 +886,11 @@ For example:
     def evaluate(self, input, args, env):
         result = ''
         result += '\n'.join(
-            ("%s = %s { %s }" % (
+            ["%s = %s { %s }" % (
                 name,
                 env.variables[name].type(),
                 env.variables[name].summary())
-                for name in env.variables.keys()))
+                for name in env.variables.keys()])
         return StringValue(result)
 
 
@@ -853,26 +900,39 @@ class HostCommand(Command):
 
 For example:
 
+    show the current host.
     -> host
-    -> host https://api.coffeeshop.com
-    -> host api.barbershop.com
+
+    create a host with the schema specified
+    -> host NAME https://api.coffeeshop.com
+
+    create a host with no schema (you will be prompted for a schema).
+    -> host NAME api.barbershop.com
+
+    switch to a host by name
+    -> host NAME
     """
 
     def __init__(self):
         super().__init__('host', ['h'])
 
     def evaluate(self, input, args, env):
-        if len(args) == 1:
-            if (args[0] in env.variables and
-                    env.variables[args[0]].type() == HostValue.TYPE):
-                env.host = env.variables[args[0]]
+        try:
+            if len(args) == 1:
+                # select named Host
+                env.host = env.lookup(args[0], HostValue.TYPE)
+                return env.host
+            elif len(args) == 2:
+                # define new Host
+                env.host = env.bind(
+                        args[0], HostValue(args[0], self._get_host(args[1])))
+                return env.host
+            elif not args and env.host:
+                return env.host
             else:
-                env.host = HostValue(self._get_host(args[0]))
-            return env.host
-        elif env.host:
-            return env.host
-        else:
-            return StringValue("no host.  Try: host HOSTNAME")
+                return StringValue("no current host. try: host HOSTNAME")
+        except ValueError as ex:
+            print('could not switch to host: %s' % ex)
 
     def _get_host(self, host):
         if not host.startswith('http'):
@@ -901,7 +961,18 @@ def print_command_result(result):
 
 
 def read_eval_print(input, env):
-    line = input.get_command('-> ')
+    """Reads from input until it receives a line of text.  When a line has been
+    received, the line is evaluated as a command and then the result of the
+    evaluation is printed.
+
+    Comments begin with the '#' character."""
+    line = None
+    while True:
+        line = input.get_command('-> ')
+        if line is None:
+            return False, None
+        if line and not line.startswith('#'):
+            break
     command, args = read_command(line)
     if command:
         input.display_command(command, args)
@@ -922,12 +993,16 @@ def main():
             success, result = read_eval_print(console, env)
             if not success:
                 tokens = result.split(' ')
-                if len(tokens) == 1 and tokens[0] in env.variables:
-                    env.variables[tokens[0]].display()
+                if len(tokens) == 1:
+                    env.lookup(tokens[0]).display()
                 elif result:
                     print('unknown command or variable: %s' % result)
         except KeyboardInterrupt:
             print("Press Ctrl-D to quit.")
+        except KeyError as ex:
+            print(ex.args[0])
+        except ValueError as ex:
+            print(ex.args[0])
         except EOFError:
             break
         except:

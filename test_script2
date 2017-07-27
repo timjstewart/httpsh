@@ -1,2 +1,19 @@
-es = host http://localhost:9200
-get /objective2/objective/_search?q=book_title:Lial | hits.hits._source
+# Comment
+host es http://localhost:9200
+header accept application/json
+host dogs http://localhost:8080
+header accept application/json
+
+# Comment
+host es
+lial = get /objective2/objective/_search?q=book_title:Lial 
+select lial  hits.hits._source
+
+# Comment
+host dogs
+pugs = get /dogs?breed=Pug
+select pugs content.breed
+
+# Cleanup
+rm dogs
+rm es
