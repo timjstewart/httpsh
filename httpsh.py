@@ -417,7 +417,7 @@ class HelpCommand(Command):
 
             print("httpsh v%d.%d.%d" % VERSION)
             print("The following are commands that you can enter in " +
-                  "the shell, listed by category:\n")
+                  "the shell, grouped by category:\n")
             for group in grouped:
                 print(style(bold(group[0])))
                 for command in sorted(group[1], key=lambda x: x.name):
@@ -705,11 +705,14 @@ class HttpCommand(Command):
                     command += '/'
                 command += arguments[0]
             command += '"'
+            # Prompt for payload if method can handle one.
+            payload = self.get_payload(input, env)
             # Headers
             for name, value in env.host.headers.items():
                 command += " -H '%s: %s'" % (name, value)
+            if payload and 'Content-Type' not in env.host.headers:
+                command += " -H 'Content-Type: application/json'"
             # Payload if provided
-            payload = self.get_payload(input, env)
             if payload:
                 command += " -d '" + json.dumps(payload) + "'"
             return command
@@ -1013,9 +1016,7 @@ class EnvCommand(Command):
         result += style(bold('host: '))
         if env.host:
             result += '%s (%s)' % (env.host.hostname, env.host.alias)
-        result += '\n'
         # Add headers
-        result += style(bold('headers:'))
         if env.host:
             for h, v in env.host.headers.items():
                 result += '\n  %s: %s' % (style(bold(h)), v)
