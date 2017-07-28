@@ -7,7 +7,8 @@ import statistics
 import sys
 
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Sequence, Any, Mapping, List, cast
+from typing import (Optional, Dict, Tuple, Sequence, Any, Mapping, List, Union,
+                    cast)
 from typing import TextIO
 
 import colorama
@@ -20,6 +21,8 @@ from pygments import highlight, lexers, formatters
 
 
 VERSION = (0, 0, 1)
+
+JsonValue = Union[int, bool, float, List[Any], Dict[str, Any]]
 
 
 class Value(ABC):
@@ -35,6 +38,9 @@ class Value(ABC):
     @abstractmethod
     def type(self) -> str:
         pass
+
+
+ValueOrStr = Union[str, Value]
 
 
 class History(object):
@@ -119,7 +125,8 @@ class Command(ABC):
 
     @abstractmethod
     def evaluate(self, input: IO, arguments: Sequence[str],
-                 environment: Environment) -> Value:
+                 environment: Environment,
+                 value: Optional[Value] = None) -> Value:
         pass
 
     def is_assignable(self) -> bool:
@@ -170,7 +177,7 @@ class FileIO(IO):
 commands = {}  # type: Dict[str, Command]
 
 
-def format_json(d: Dict) -> str:
+def format_json(d: JsonValue) -> str:
     """Formats a dictionary as a JSON string."""
     return json.dumps(d, sort_keys=True, indent=3)
 
@@ -180,7 +187,7 @@ def colorize_json(j: str) -> str:
     return highlight(j, lexers.JsonLexer(), formatters.TerminalFormatter())
 
 
-def pretty_json(d: Dict) -> str:
+def pretty_json(d: JsonValue) -> str:
     """returns a pretty rendition of a dictionary."""
     return colorize_json(format_json(d))
 
@@ -331,7 +338,8 @@ class HelpCommand(Command):
         super().__init__('help', ['?'])
 
     def evaluate(self, input: IO, arguments: Sequence[str],
-                 environment: Environment):
+                 environment: Environment,
+                 value: Optional[Value] = None):
         if arguments:
             # Lookup help for the specified command
             command, args = find_command(arguments)
@@ -368,7 +376,8 @@ For example:
         super().__init__('load', ['.', 'source', 'run'])
 
     def evaluate(self, _, arguments: Sequence[str],
-                 environment: Environment) -> Value:
+                 environment: Environment,
+                 value: Optional[Value] = None) -> Value:
         if arguments:
             file_name = arguments[0]
             with open(os.path.expanduser(file_name), 'r') as script:
@@ -394,7 +403,8 @@ class AssignCommand(Command):
         self.command = command
 
     def evaluate(self, input, arguments: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         if self.command.is_assignable():
             result = self.command.evaluate(input, arguments, env)
             env.bind(self.var_name, result)
@@ -420,7 +430,8 @@ For example:
         super().__init__('repeat', [])
 
     def evaluate(self, input: IO, arguments: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         repetitions = int(arguments[0])
         command, cmd_args = find_command(arguments[1:])
         if command:
@@ -473,24 +484,25 @@ For example:
         super().__init__('select', [])
 
     def _get_resp(self, arguments: Sequence[Any],
-                  env: Environment) -> Response:
+                  value: Optional[Value],
+                  env: Environment) -> Tuple[Response, Sequence[str]]:
+        if isinstance(value, Response):
+            return value, arguments
         if arguments:
-            arg = arguments[0]
-            if type(arg) == Response and arg.type() == Response.TYPE:
-                return arg
-            elif type(arg) == str:
-                return cast(Response, env.lookup(arg, Response.TYPE))
+            return (cast(Response, env.lookup(arguments[0], Response.TYPE)),
+                    arguments[1:])
         raise ValueError('could not get Response from arguments')
 
     def evaluate(self, input, arguments: Sequence[str],
-                 env: Environment) -> Value:
-        resp = self._get_resp(arguments, env)
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
+        resp, arguments = self._get_resp(arguments, value, env)
         if resp:
             # make sure that the Response contains JSON.  You can't run
             # select on an HTML or XML document.
             if resp.is_json():
-                if len(arguments) == 2:
-                    return self._select(resp, arguments[1])
+                if len(arguments) == 1:
+                    return self._select(resp, arguments[0])
                 else:
                     return resp
             else:
@@ -550,11 +562,11 @@ For example:
         else:
             return result
 
-    def _select_part(self, node: Mapping[str, Any], part: str,
+    def _select_part(self, node: JsonValue, part: str,
                      parts: Sequence[str], collect_here: Sequence[str],
-                     collected: Dict[str, Any]) -> Any:
+                     collected: Dict[str, Any]) -> JsonValue:
         patterns, collect = self._parse_expression(part)
-        if type(node) == dict:
+        if isinstance(node, dict):
             collected.update(
                     {key: node[key]
                      for c in collect_here
@@ -573,7 +585,7 @@ For example:
                                  for pattern in patterns
                                  for key in self._get_matching_keys(
                                      node, pattern)}))
-        elif type(node) == list:
+        elif isinstance(node, list):
             return [self._select_part(item, ','.join(patterns),
                                       parts, collect_here, collected)
                     for item in node]
@@ -597,7 +609,8 @@ class HttpCommand(Command):
         return True
 
     def evaluate(self, input: IO, arguments: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         if env.host:
             path = (arguments[0] if arguments else '/')
             path = ('/' + path) if not path.startswith('/') else path
@@ -613,7 +626,7 @@ class HttpCommand(Command):
                 # filter the HTTP response through a select statement
                 select_stmt = arguments[2]
                 return commands['select'].evaluate(
-                        input, [resp, select_stmt], env)
+                        input, [select_stmt], env, value=resp)
             else:
                 return resp
         else:
@@ -750,7 +763,8 @@ class HeadersCommand(Command):
         super().__init__('headers', ['hs'])
 
     def evaluate(self, input: IO, args: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         if not env.host:
             return StringValue('no host defined')
         if len(args) == 0:
@@ -781,7 +795,8 @@ class HostsCommand(Command):
         super().__init__('hosts', [])
 
     def evaluate(self, input: IO, args: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         if len(args) == 0:
             return StringValue(self._get_hosts(env))
         else:
@@ -795,7 +810,9 @@ class HostsCommand(Command):
     def _get_hosts(self, env: Environment) -> str:
         return '\n'.join(
                 self._format_host(
-                    var_name, env.variables[var_name], env.host)
+                    var_name, cast(HostValue, env.lookup(
+                        var_name, HostValue.TYPE)),
+                    env.host)
                 for var_name in sorted(env.variables.keys())
                 if env.variables[var_name].type() == HostValue.TYPE)
 
@@ -814,7 +831,8 @@ For example:
         super().__init__('header', ['hd'])
 
     def evaluate(self, input: IO, args: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         if not env.host:
             return StringValue('no host defined')
         if len(args) == 1:
@@ -837,7 +855,8 @@ class TypeCommand(Command):
         super().__init__('type', ['t'])
 
     def evaluate(self, input: IO, args: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         if args:
             try:
                 return StringValue(env.lookup(args[0]).type())
@@ -855,7 +874,8 @@ class EnvCommand(Command):
         super().__init__('env', [])
 
     def evaluate(self, input: IO, args: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         result = ''
         # Add host
         result += bold('host: ')
@@ -890,7 +910,8 @@ For example:
         super().__init__('remove', ['rm'])
 
     def evaluate(self, input: IO, args: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         if len(args) != 1:
             return StringValue('usage remove VARNAME')
         result = env.variables.pop(args[0], None)
@@ -917,7 +938,8 @@ For example:
         super().__init__('vars', ['ls'])
 
     def evaluate(self, input: IO, args: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         result = ''
         result += '\n'.join(
             ["%s = %s { %s }" % (
@@ -951,7 +973,8 @@ For example:
         super().__init__('host', ['h'])
 
     def evaluate(self, input: IO, args: Sequence[str],
-                 env: Environment) -> Value:
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
         try:
             if len(args) == 1:
                 # select named Host
@@ -990,9 +1013,10 @@ def read_command(line) -> Tuple[Command, Sequence[str]]:
 
 
 def evaluate_command(command, input: IO, args: Sequence[str],
-                     env: Environment) -> Value:
+                     env: Environment,
+                     value: Optional[Value] = None) -> Value:
     """evaluates a command in an environment."""
-    return command.evaluate(input, args, env)
+    return command.evaluate(input, args, env, value=value)
 
 
 def print_command_result(result: Value) -> None:
