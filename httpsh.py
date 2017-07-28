@@ -56,7 +56,7 @@ class History(object):
                 os.path.expanduser(History.PAYLOAD_HISTORY_FILE))
 
 
-class HostValue(Value):
+class Host(Value):
 
     TYPE = 'host'
 
@@ -74,23 +74,32 @@ class HostValue(Value):
         return "hostname = %s" % self.hostname
 
     def type(self) -> str:
-        return HostValue.TYPE
+        return Host.TYPE
+
+    def remove_header(self, name: str) -> Optional[str]:
+        return self.headers.pop(name, None)
+
+    def add_header(self, name: str, value: str) -> None:
+        self.headers[name] = value
 
 
 class Environment(object):
     """The shell's environment."""
 
     def __init__(self, history: History) -> None:
-        self.host = None  # type: HostValue
+        self.host = None  # type: Host
         self.history = history
         self.variables = {}  # type: Dict[str, Value]
 
-    def bind(self, var_name: str, value: Value) -> Value:
+    def bind(self, name: str, value: Value) -> Value:
         if value:
-            self.variables[var_name] = value
+            self.variables[name] = value
         else:
-            self.variables.pop(var_name, None)
+            self.variables.pop(name, None)
         return value
+
+    def unbind(self, name: str) -> Optional[Value]:
+        return self.variables.pop(name, None)
 
     def lookup(self, var_name: str, var_type: str=None) -> Value:
         if var_name not in self.variables:
@@ -169,9 +178,7 @@ class FileIO(IO):
         return line.strip() if line else None
 
     def display_command(self, command: str, args: Sequence[str]) -> None:
-        print("%s>> %s %s%s" % (
-            colorama.Fore.BLUE, command,
-            ' '.join(args), colorama.Fore.RESET))
+        print(style(blue(">> %s %s" % (command, ' '.join(args)))))
 
 
 commands = {}  # type: Dict[str, Command]
@@ -238,18 +245,59 @@ class NullValue(Value):
 
 class StringValue(Value):
 
-    def __init__(self, text: str) -> None:
+    COLORS = {
+            'red': colorama.Fore.RED,
+            'blue': colorama.Fore.BLUE,
+            'green': colorama.Fore.GREEN,
+            'yellow': colorama.Fore.YELLOW,
+            }
+
+    BGCOLORS = {
+            'red': colorama.Back.RED,
+            'blue': colorama.Back.BLUE,
+            'green': colorama.Back.GREEN,
+            'yellow': colorama.Back.YELLOW,
+            }
+
+    def __init__(self, text: str, bold: bool = False,
+                 color: str = None, bgcolor: str = None) -> None:
         self.text = text.strip()
+        self.bold = bold
+        self.color = color
+        self.bgcolor = bgcolor
 
     def summary(self) -> str:
-        return self.text[:20] + ('...' if len(self.text) > 20 else '')
+        return self._style(self.text[:20] +
+                           ('...' if len(self.text) > 20 else ''))
 
     def display(self) -> None:
         if self.text:
-            print(self.text)
+            print(self._style(self.text))
 
     def type(self) -> str:
         return 'text'
+
+    def _style(self, text: str) -> str:
+        result = ''
+        if self.bold:
+            result += colorama.Style.BRIGHT
+        if self.color:
+            result += StringValue.COLORS[self.color]
+        if self.bgcolor:
+            result += StringValue.BGCOLORS[self.bgcolor]
+        result += text
+        result += colorama.Style.RESET_ALL
+        return result
+
+    def __str__(self):
+        return self._style(self.text)
+
+
+class ErrorString(StringValue):
+
+    def __init__(self, text: str, severe: bool = False) -> None:
+        super().__init__(text, bold=True,
+                         color=('red' if severe else 'yellow'))
 
 
 class Response(Value):
@@ -322,7 +370,11 @@ def find_command(tokens: Sequence[str]) -> Tuple[Command, Sequence[str]]:
     found or None if it wasn't.."""
     if len(tokens) >= 3 and tokens[1] == '=':
         var_name = tokens[0]
-        rvalue, args2 = find_command(tokens[2:])
+        command_string = tokens[2:]
+        rvalue, args2 = find_command(command_string)
+        if not rvalue:
+            raise KeyError('could not find command: %s' %
+                           ' '.join(command_string))
         return AssignCommand(var_name, rvalue), args2
     elif tokens[0] in commands:
         return commands[tokens[0]], tokens[1:]
@@ -388,9 +440,8 @@ For example:
                     if not success and not result:
                         break
                 elapsed = datetime.datetime.now() - start
-                return StringValue("Script ran in: %s%.3f%s seconds" % (
-                    colorama.Style.BRIGHT, elapsed.total_seconds(),
-                    colorama.Style.NORMAL))
+                return StringValue("Script ran in: %.3f seconds" % (
+                        elapsed.total_seconds()), bold=True)
         else:
             raise ValueError('usage: run SCRIPT_NAME')
 
@@ -410,8 +461,10 @@ class AssignCommand(Command):
             env.bind(self.var_name, result)
             return result
         else:
-            raise ValueError('%s commands are not assignable' %
-                             self.command.name)
+            raise ValueError(
+                    "the '%s' command is not assignable. (aliases: %s)" % (
+                        self.command.name,
+                        ', '.join(self.command.aliases)))
 
 
 @command
@@ -445,7 +498,7 @@ For example:
                              .total_seconds())
             return StringValue(
                     'Ran command: %d times.  Average time: %f seconds' % (
-                        repetitions, statistics.mean(times)))
+                        repetitions, statistics.mean(times)), bold=True)
         else:
             raise KeyError('unknown command: %s' % arguments)
 
@@ -454,30 +507,36 @@ For example:
 class SelectCommand(Command):
     """selects a sub-tree of a JSON response.
 
+Given a Response named resp containing the following JSON:
+
+    {
+       "dog": {
+           "name": "Fluffy",
+           "nicknames": [ "Mr Fluffy", "Fluffster", "Fluffles" ],
+           "breed": "Chihuahua"
+        },
+        "_links": []
+    }
+
 For example:
 
     display all of the JSON in the response.
     -> select resp
 
-    display only the content node of the JSON response.
-    -> select resp content
+    display only the dog node of the JSON response.
+    -> select resp dog
 
-    display only the href node of each item in content._links.
-    -> select resp content._links.href
+    display only the dog's nicknames.
+    -> select resp dog.nicknames
 
-    display all properties ending in Name
-    -> select resp content.*Name
+    display all properties ending in name.
+    -> select resp dog.*name
 
-    display only the firstName and lastName properties
-    -> select resp content.firstName,lastName
+    display only the dog's name and breed.
+    -> select resp dog.name,breed
 
-    display all properties ending in Name and include the value
-    of content's totalPages property.
-    -> select resp content(totalPages).*Name
-
-    display all properties ending in Name and include the value
-    of the root JSON node's totalPages property.
-    -> select resp (totalPages).*Name
+    display dog's nicknames and its name.
+    -> select resp dog(name).nicknames
     """
 
     def __init__(self) -> None:
@@ -510,9 +569,9 @@ For example:
                 else:
                     return resp
             else:
-                return StringValue("response is not JSON.")
+                return ErrorString("response is not JSON.")
         else:
-            return StringValue("usage select RESPONSE [SELECT_STATEMENT]")
+            return ErrorString("usage select RESPONSE [SELECT_STATEMENT]")
 
     def _select(self, resp: Response, select_stmt: str) -> Value:
         """runs the select statement on a Response with a JSON payload.
@@ -634,7 +693,7 @@ class HttpCommand(Command):
             else:
                 return resp
         else:
-            return StringValue('please specify a host.')
+            return ErrorString('please specify a host.')
 
     def get_payload(self, input: IO, env: Environment) -> str:
         return None
@@ -770,15 +829,14 @@ class HeadersCommand(Command):
                  env: Environment,
                  value: Optional[Value] = None) -> Value:
         if not env.host:
-            return StringValue('no host defined')
+            return ErrorString('no host defined')
         if len(args) == 0:
             return StringValue(self._get_headers(env))
         else:
-            return StringValue('headers has no arguments')
+            return ErrorString('headers has no arguments')
 
     def _format_header(self, key: str, value: str) -> str:
-        return ("%s%s: %s%s" % (
-            colorama.Style.BRIGHT, key, value, colorama.Style.NORMAL))
+        return (style(bold("%s: %s" % (key, value))))
 
     def _get_headers(self, env: Environment) -> str:
         if env.host:
@@ -804,21 +862,21 @@ class HostsCommand(Command):
         if len(args) == 0:
             return StringValue(self._get_hosts(env))
         else:
-            return StringValue('hosts has no arguments')
+            return ErrorString('hosts has no arguments')
 
-    def _format_host(self, var_name: str, host: HostValue,
-                     current_host: HostValue) -> str:
+    def _format_host(self, var_name: str, host: Host,
+                     current_host: Host) -> str:
         return ("%s%s: %s" % ('*' if host == current_host else ' ',
                               var_name, host.hostname))
 
     def _get_hosts(self, env: Environment) -> str:
         return '\n'.join(
                 self._format_host(
-                    var_name, cast(HostValue, env.lookup(
-                        var_name, HostValue.TYPE)),
+                    var_name, cast(Host, env.lookup(
+                        var_name, Host.TYPE)),
                     env.host)
                 for var_name in sorted(env.variables.keys())
-                if env.variables[var_name].type() == HostValue.TYPE)
+                if env.variables[var_name].type() == Host.TYPE)
 
 
 @command
@@ -838,17 +896,17 @@ For example:
                  env: Environment,
                  value: Optional[Value] = None) -> Value:
         if not env.host:
-            return StringValue('no host defined')
+            return ErrorString('no host defined')
         if len(args) == 1:
             try:
                 return StringValue(env.host.headers[args[0]])
             except Exception:
-                return StringValue("unknown header: %s" % args[0])
+                return ErrorString("unknown header: %s" % args[0])
         elif len(args) > 1:
-            env.host.headers[args[0]] = ' '.join(args[1:])
+            env.host.add_header(args[0], ' '.join(args[1:]))
             return NullValue()
         else:
-            return StringValue('usage: header NAME [VALUE]')
+            return ErrorString('usage: header NAME [VALUE]')
 
 
 @command
@@ -865,9 +923,9 @@ class TypeCommand(Command):
             try:
                 return StringValue(env.lookup(args[0]).type())
             except KeyError:
-                return StringValue("unknown variable: %s" % args[0])
+                return ErrorString("unknown variable: %s" % args[0])
         else:
-            return StringValue("usage: type VAR")
+            return ErrorString("usage: type VAR")
 
 
 @command
@@ -882,18 +940,18 @@ class EnvCommand(Command):
                  value: Optional[Value] = None) -> Value:
         result = ''
         # Add host
-        result += bold('host: ')
+        result += style(bold('host: '))
         if env.host:
             result += '%s (%s)' % (env.host.hostname, env.host.alias)
         result += '\n'
         # Add headers
-        result += bold('headers:')
+        result += style(bold('headers:'))
         if env.host:
             for h, v in env.host.headers.items():
                 result += '\n  %s: %s' % (h, v)
         result += '\n'
         # Add variables
-        result += bold('variables:')
+        result += style(bold('variables:'))
         for key, val in env.variables.items():
             result += "\n  %s = %s { %s }" % (
                 key, env.variables[key].type(),
@@ -903,27 +961,36 @@ class EnvCommand(Command):
 
 @command
 class RemoveCommand(Command):
-    """removes a variable from the environment.
+    """removes a variable from the environment or a header from the current
+host.
 
 For example:
 
+    removes a variable named host1 if it exists.
     -> rm host1
+
+    removes the misspelled Acccept header from the current host.
+    -> rm Acccept
     """
 
     def __init__(self) -> None:
-        super().__init__('remove', ['rm'])
+        super().__init__('remove', ['rm', 'del'])
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
                  value: Optional[Value] = None) -> Value:
         if len(args) != 1:
-            return StringValue('usage remove VARNAME')
-        result = env.variables.pop(args[0], None)
-        if result == env.host:
-            env.host = None
-        if not result:
-            return StringValue('no variable named: %s' % args[0])
-        return NullValue()
+            return ErrorString('usage remove NAME')
+        name = args[0]
+        result = env.unbind(name)
+        if result:
+            if result == env.host:
+                env.host = None
+            return StringValue('removed variable: %s' % name)
+        if env.host:
+            if env.host.remove_header(name):
+                return StringValue('removed header: %s' % name)
+        return ErrorString('no variable or header named: %s' % name)
 
 
 @command
@@ -982,20 +1049,20 @@ For example:
         try:
             if len(args) == 1:
                 # select named Host
-                env.host = cast(HostValue,
-                                env.lookup(args[0], HostValue.TYPE))
+                env.host = cast(Host,
+                                env.lookup(args[0], Host.TYPE))
                 return env.host
             elif len(args) == 2:
                 # define new Host
                 env.host = cast(
-                        HostValue, env.bind(
+                        Host, env.bind(
                             args[0],
-                            HostValue(args[0], self._get_host(args[1]))))
+                            Host(args[0], self._get_host(args[1]))))
                 return env.host
             elif not args and env.host:
                 return env.host
             else:
-                return StringValue("no current host. try: host HOSTNAME")
+                return ErrorString("no current host. try: host HOSTNAME")
         except ValueError as ex:
             raise ValueError('could not switch to host: %s' % ex)
 
@@ -1082,12 +1149,13 @@ def main() -> None:
         except KeyboardInterrupt:
             print("Press Ctrl-D to quit.")
         except KeyError as ex:
-            print(ex.args[0])
+            print(ErrorString(ex.args[0]))
         except ValueError as ex:
-            print(ex.args[0])
+            print(ErrorString(ex.args[0]))
         except EOFError:
             break
         except:
+            # Give me some information about unexpected errors.
             import traceback
             traceback.print_exc()
 
