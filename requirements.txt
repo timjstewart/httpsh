@@ -1,0 +1,4 @@
+colorama==0.3.9
+prompt-toolkit==1.0.14
+Pygments==2.2.0
+requests==2.18.2

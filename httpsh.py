@@ -3,7 +3,6 @@ import itertools
 import json
 import os
 import re
-import requests
 import statistics
 import sys
 
@@ -13,6 +12,7 @@ from typing import (Optional, Dict, Tuple, Sequence, Any, Mapping, List, Union,
 from typing import TextIO
 
 import colorama
+import requests
 
 from prompt_toolkit.shortcuts import prompt
 from prompt_toolkit.history import FileHistory
@@ -21,7 +21,7 @@ from prompt_toolkit.contrib.completers import WordCompleter
 from pygments import highlight, lexers, formatters
 
 
-VERSION = (0, 0, 1)
+VERSION = (0, 0, 2)
 
 JsonValue = Union[int, bool, float, List[Any], Dict[str, Any]]
 
@@ -415,10 +415,14 @@ class HelpCommand(Command):
                     sorted(commands.values(), key=lambda x: x.category),
                     key=lambda x: x.category)
 
+            print("httpsh v%d.%d.%d" % VERSION)
+            print("The following are commands that you can enter in " +
+                  "the shell, listed by category:\n")
             for group in grouped:
                 print(style(bold(group[0])))
-                for command in group[1]:
+                for command in sorted(group[1], key=lambda x: x.name):
                     print("  %s" % self._format_doc_string_short(command))
+        return NullValue()
 
     def _format_doc_string_short(self, command: Command) -> str:
         return "%-7s - %s" % (
@@ -1040,7 +1044,8 @@ For example:
     """
 
     def __init__(self) -> None:
-        super().__init__('remove', ['rm', 'del'], category=Category.ENVIRONMENT)
+        super().__init__('remove', ['rm', 'del'],
+                         category=Category.ENVIRONMENT)
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
@@ -1198,10 +1203,37 @@ def banner():
 type help for help.""" % VERSION
 
 
+def should_show_version() -> bool:
+    if len(sys.argv) >= 2:
+        return sys.argv[1] in ['--version', '-version']
+    return False
+
+
+def should_show_help() -> bool:
+    if len(sys.argv) >= 2:
+        return sys.argv[1] in ['--help', '-help', '-h', '/?']
+    return False
+
+
+def version_and_exit(console: IO, env: Environment) -> None:
+    print("httpsh v%d.%d.%d" % VERSION)
+    sys.exit(0)
+
+
+def help_and_exit(console: IO, env: Environment) -> None:
+    print_command_result(
+            find_command(['help'])[0].evaluate(console, [], env))
+    sys.exit(0)
+
+
 def main() -> None:
     colorama.init()
     env = Environment(History())
     console = ConsoleIO(env)
+    if should_show_version():
+        version_and_exit(console, env)
+    if should_show_help():
+        help_and_exit(console, env)
     print(banner())
     while True:
         try:
