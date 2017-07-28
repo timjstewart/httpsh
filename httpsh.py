@@ -5,10 +5,10 @@ import re
 import requests
 import statistics
 import sys
-from io import StringIO
 
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Sequence, Any, Mapping, List
+from typing import Dict, Tuple, Sequence, Any, Mapping, List, cast
+from typing import TextIO
 
 import colorama
 
@@ -17,6 +17,9 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.contrib.completers import WordCompleter
 from pygments import highlight, lexers, formatters
+
+
+VERSION = (0, 0, 1)
 
 
 class Value(ABC):
@@ -47,11 +50,32 @@ class History(object):
                 os.path.expanduser(History.PAYLOAD_HISTORY_FILE))
 
 
+class HostValue(Value):
+
+    TYPE = 'host'
+
+    def __init__(self, alias: str, hostname: str) -> None:
+        self.alias = alias
+        self.hostname = hostname
+        self.headers = {}  # type: Dict[str, str]
+
+    def display(self) -> None:
+        print(style(bold(self.hostname)))
+        for header in sorted(self.headers.keys()):
+            print('  %s: %s' % (style(bold(header)), self.headers[header]))
+
+    def summary(self) -> str:
+        return "hostname = %s" % self.hostname
+
+    def type(self) -> str:
+        return HostValue.TYPE
+
+
 class Environment(object):
     """The shell's environment."""
 
     def __init__(self, history: History) -> None:
-        self.host = None  # type: Value
+        self.host = None  # type: HostValue
         self.history = history
         self.variables = {}  # type: Dict[str, Value]
 
@@ -104,20 +128,20 @@ class Command(ABC):
 
 class ConsoleIO(IO):
 
-    def __init__(self, history: History) -> None:
-        self.history = history
+    def __init__(self, env: Environment) -> None:
+        self.env = env
 
     def get_payload(self, prompt_text: str) -> str:
         return prompt(
                 prompt_text,
                 auto_suggest=AutoSuggestFromHistory(),
-                history=self.history.payload_history).strip()
+                history=self.env.history.payload_history).strip()
 
     def get_command(self, prompt_text: str) -> str:
         return prompt(
                 prompt_text,
                 auto_suggest=AutoSuggestFromHistory(),
-                history=self.history.command_history).strip()
+                history=self.env.history.command_history).strip()
 
     def display_command(self, command: str, args: Sequence[str]) -> None:
         pass
@@ -126,7 +150,7 @@ class ConsoleIO(IO):
 class FileIO(IO):
     """Reads commands from a file."""
 
-    def __init__(self, file: StringIO) -> None:
+    def __init__(self, file: TextIO) -> None:
         self.file = file
 
     def get_command(self, prompt_text: str) -> str:
@@ -188,27 +212,6 @@ def command(c):
     commands[instance.name] = instance
     for alias in instance.aliases:
         commands[alias] = instance
-
-
-class HostValue(Value):
-
-    TYPE = 'host'
-
-    def __init__(self, alias: str, hostname: str) -> None:
-        self.alias = alias
-        self.hostname = hostname
-        self.headers = {}  # type: Dict[str, str]
-
-    def display(self) -> None:
-        print(style(bold(self.hostname)))
-        for header in sorted(self.headers.keys()):
-            print('  %s: %s' % (style(bold(header)), self.headers[header]))
-
-    def summary(self) -> str:
-        return "hostname = %s" % self.hostname
-
-    def type(self) -> str:
-        return HostValue.TYPE
 
 
 class NullValue(Value):
@@ -307,7 +310,7 @@ class Response(Value):
         return self.resp.json() if self.is_json() else None
 
 
-def find_command(tokens: Sequence[str]) -> Tuple[Command, List[str]]:
+def find_command(tokens: Sequence[str]) -> Tuple[Command, Sequence[str]]:
     """Looks up a command based on tokens and returns the command if it was
     found or None if it wasn't.."""
     if len(tokens) >= 3 and tokens[1] == '=':
@@ -476,7 +479,7 @@ For example:
             if type(arg) == Response and arg.type() == Response.TYPE:
                 return arg
             elif type(arg) == str:
-                return env.lookup(arg, Response.TYPE)
+                return cast(Response, env.lookup(arg, Response.TYPE))
         raise ValueError('could not get Response from arguments')
 
     def evaluate(self, input, arguments: Sequence[str],
@@ -867,11 +870,10 @@ class EnvCommand(Command):
         result += '\n'
         # Add variables
         result += bold('variables:')
-        for k, v in env.variables.items():
+        for key, val in env.variables.items():
             result += "\n  %s = %s { %s }" % (
-                k,
-                env.variables[k].type(),
-                env.variables[k].summary())
+                key, env.variables[key].type(),
+                env.variables[key].summary())
         return StringValue(result)
 
 
@@ -922,7 +924,7 @@ For example:
                 name,
                 env.variables[name].type(),
                 env.variables[name].summary())
-                for name in env.variables.keys()])
+                for name in sorted(env.variables.keys())])
         return StringValue(result)
 
 
@@ -953,12 +955,15 @@ For example:
         try:
             if len(args) == 1:
                 # select named Host
-                env.host = env.lookup(args[0], HostValue.TYPE)
+                env.host = cast(HostValue,
+                                env.lookup(args[0], HostValue.TYPE))
                 return env.host
             elif len(args) == 2:
                 # define new Host
-                env.host = env.bind(
-                        args[0], HostValue(args[0], self._get_host(args[1])))
+                env.host = cast(
+                        HostValue, env.bind(
+                            args[0],
+                            HostValue(args[0], self._get_host(args[1]))))
                 return env.host
             elif not args and env.host:
                 return env.host
@@ -976,7 +981,7 @@ For example:
         return host
 
 
-def read_command(line) -> Tuple[Command, List[str]]:
+def read_command(line) -> Tuple[Command, Sequence[str]]:
     """Reads a command from a string and returns it."""
     if line.strip():
         return find_command(line.split(' '))
@@ -994,6 +999,13 @@ def print_command_result(result: Value) -> None:
     result.display()
 
 
+def get_prompt_string(env: Environment) -> str:
+    if env.host:
+        return '[%s] -> ' % env.host.alias
+    else:
+        return '-> '
+
+
 def read_eval_print(input: IO, env: Environment) -> Tuple[bool, str]:
     """Reads from input until it receives a line of text.  When a line has been
     received, the line is evaluated as a command and then the result of the
@@ -1002,7 +1014,7 @@ def read_eval_print(input: IO, env: Environment) -> Tuple[bool, str]:
     Comments begin with the '#' character."""
     line = None
     while True:
-        line = input.get_command('-> ')
+        line = input.get_command(get_prompt_string(env))
         if line is None:
             return False, None
         if line and not line.startswith('#'):
@@ -1013,15 +1025,23 @@ def read_eval_print(input: IO, env: Environment) -> Tuple[bool, str]:
         result = evaluate_command(command, input, args, env)
         if result:
             print_command_result(result)
-        return True, result
+        return True, None
     else:
         return False, line
+
+
+def banner():
+    """returns a benner string that shows the program name, version, and a way
+    to get help."""
+    return """httpsh v%d.%d.%d
+type help for help.""" % VERSION
 
 
 def main() -> None:
     colorama.init()
     env = Environment(History())
-    console = ConsoleIO(env.history)
+    console = ConsoleIO(env)
+    print(banner())
     while True:
         try:
             success, result = read_eval_print(console, env)
