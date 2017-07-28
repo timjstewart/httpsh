@@ -1,4 +1,5 @@
 import datetime
+import itertools
 import json
 import os
 import re
@@ -23,6 +24,14 @@ from pygments import highlight, lexers, formatters
 VERSION = (0, 0, 1)
 
 JsonValue = Union[int, bool, float, List[Any], Dict[str, Any]]
+
+
+class Category(object):
+    JSON = 'JSON'
+    ENVIRONMENT = 'environment'
+    HOSTS = 'hosts'
+    MISC = 'misc'
+    REQUESTS = 'requests'
 
 
 class Value(ABC):
@@ -128,9 +137,11 @@ class IO(ABC):
 
 class Command(ABC):
 
-    def __init__(self, name: str, aliases: Sequence[str]) -> None:
+    def __init__(self, name: str, aliases: Sequence[str],
+                 category: str = 'misc') -> None:
         self.name = name
         self.aliases = aliases
+        self.category = category
 
     @abstractmethod
     def evaluate(self, input: IO, arguments: Sequence[str],
@@ -182,6 +193,7 @@ class FileIO(IO):
 
 
 commands = {}  # type: Dict[str, Command]
+aliased_commands = {}  # type: Dict[str, Command]
 
 
 def format_json(d: JsonValue) -> str:
@@ -219,13 +231,13 @@ def green(s: str) -> str:
     return colorama.Fore.GREEN + str(s)
 
 
-def command(c):
+def command(command_class):
     """Decorator that creates an instance of the decorated Command class and
     registers it under its name and aliases."""
-    instance = c()
-    commands[instance.name] = instance
-    for alias in instance.aliases:
-        commands[alias] = instance
+    cmd = command_class()
+    commands[cmd.name] = aliased_commands[cmd.name] = cmd
+    for alias in cmd.aliases:
+        aliased_commands[alias] = cmd
 
 
 class NullValue(Value):
@@ -376,8 +388,8 @@ def find_command(tokens: Sequence[str]) -> Tuple[Command, Sequence[str]]:
             raise KeyError('could not find command: %s' %
                            ' '.join(command_string))
         return AssignCommand(var_name, rvalue), args2
-    elif tokens[0] in commands:
-        return commands[tokens[0]], tokens[1:]
+    elif tokens[0] in aliased_commands:
+        return aliased_commands[tokens[0]], tokens[1:]
     else:
         return None, tokens
 
@@ -399,9 +411,14 @@ class HelpCommand(Command):
                 print("%s" % self._format_doc_string_long(command))
         else:
             # Lookup help for all commands
-            for command in sorted(set(commands.values()),
-                                  key=lambda x: x.name):
-                print(" %s" % self._format_doc_string_short(command))
+            grouped = itertools.groupby(
+                    sorted(commands.values(), key=lambda x: x.category),
+                    key=lambda x: x.category)
+
+            for group in grouped:
+                print(style(bold(group[0])))
+                for command in group[1]:
+                    print("  %s" % self._format_doc_string_short(command))
 
     def _format_doc_string_short(self, command: Command) -> str:
         return "%-7s - %s" % (
@@ -540,7 +557,7 @@ For example:
     """
 
     def __init__(self) -> None:
-        super().__init__('select', [])
+        super().__init__('select', [], category=Category.JSON)
 
     def _get_resp(self, arguments: Sequence[Any],
                   value: Optional[Value],
@@ -665,7 +682,7 @@ class HttpCommand(Command):
 
     def __init__(self, name: str, aliases: Sequence[str],
                  method: str) -> None:
-        super().__init__(name, aliases)
+        super().__init__(name, aliases, category=Category.REQUESTS)
         self.method = method
 
     def is_assignable(self) -> bool:
@@ -712,7 +729,7 @@ class HttpCommand(Command):
             if len(arguments) > 2 and arguments[1] == '|':
                 # filter the HTTP response through a select statement
                 select_stmt = arguments[2]
-                return commands['select'].evaluate(
+                return aliased_commands['select'].evaluate(
                         input, [select_stmt], env, value=resp)
             else:
                 return resp
@@ -725,11 +742,14 @@ class HttpCommand(Command):
 
 @command
 class CurlCommand(Command):
-    """sends a HEAD request using the current value of host and headers.
+    """prints a curl command for the provided HTTP command (e.g. get, put).
+
+You must have an active host.  Any headers added to the current host will be
+included in the curl command.
 
 For example:
 
-    -> head /customers
+    -> curl get /customers
     """
 
     def __init__(self) -> None:
@@ -869,7 +889,7 @@ class HeadersCommand(Command):
     """shows the current list of headers."""
 
     def __init__(self) -> None:
-        super().__init__('headers', ['hs'])
+        super().__init__('headers', ['hs'], category=Category.HOSTS)
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
@@ -900,7 +920,7 @@ class HostsCommand(Command):
     The current host is prefixed by an asterisk."""
 
     def __init__(self) -> None:
-        super().__init__('hosts', [])
+        super().__init__('hosts', [], category=Category.HOSTS)
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
@@ -913,7 +933,7 @@ class HostsCommand(Command):
     def _format_host(self, var_name: str, host: Host,
                      current_host: Host) -> str:
         return ("%s%s: %s" % ('*' if host == current_host else ' ',
-                              var_name, host.hostname))
+                              style(bold(var_name)), host.hostname))
 
     def _get_hosts(self, env: Environment) -> str:
         return '\n'.join(
@@ -936,7 +956,7 @@ For example:
     """
 
     def __init__(self) -> None:
-        super().__init__('header', ['hd'])
+        super().__init__('header', ['hd'], category=Category.HOSTS)
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
@@ -960,7 +980,7 @@ class TypeCommand(Command):
     """displays the type of a variable."""
 
     def __init__(self) -> None:
-        super().__init__('type', ['t'])
+        super().__init__('type', ['t'], category=Category.ENVIRONMENT)
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
@@ -979,7 +999,7 @@ class EnvCommand(Command):
     """displays the environment."""
 
     def __init__(self) -> None:
-        super().__init__('env', [])
+        super().__init__('env', [], category=Category.ENVIRONMENT)
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
@@ -994,13 +1014,13 @@ class EnvCommand(Command):
         result += style(bold('headers:'))
         if env.host:
             for h, v in env.host.headers.items():
-                result += '\n  %s: %s' % (h, v)
+                result += '\n  %s: %s' % (style(bold(h)), v)
         result += '\n'
         # Add variables
         result += style(bold('variables:'))
         for key, val in env.variables.items():
             result += "\n  %s = %s { %s }" % (
-                key, env.variables[key].type(),
+                style(bold(key)), env.variables[key].type(),
                 env.variables[key].summary())
         return StringValue(result)
 
@@ -1020,7 +1040,7 @@ For example:
     """
 
     def __init__(self) -> None:
-        super().__init__('remove', ['rm', 'del'])
+        super().__init__('remove', ['rm', 'del'], category=Category.ENVIRONMENT)
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
@@ -1052,7 +1072,7 @@ For example:
     """
 
     def __init__(self) -> None:
-        super().__init__('vars', ['ls'])
+        super().__init__('vars', ['ls'], category=Category.ENVIRONMENT)
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
@@ -1060,7 +1080,7 @@ For example:
         result = ''
         result += '\n'.join(
             ["%s = %s { %s }" % (
-                name,
+                style(bold(name)),
                 env.variables[name].type(),
                 env.variables[name].summary())
                 for name in sorted(env.variables.keys())])
@@ -1087,7 +1107,7 @@ For example:
     """
 
     def __init__(self) -> None:
-        super().__init__('host', ['h'])
+        super().__init__('host', ['h'], category=Category.HOSTS)
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
