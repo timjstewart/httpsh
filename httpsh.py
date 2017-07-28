@@ -5,8 +5,10 @@ import re
 import requests
 import statistics
 import sys
+from io import TextIO
 
 from abc import ABC, abstractmethod
+from typing import Dict, Tuple, Sequence, Any, Mapping, List
 
 import colorama
 
@@ -14,33 +16,168 @@ from prompt_toolkit.shortcuts import prompt
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.contrib.completers import WordCompleter
+from pygments import highlight, lexers, formatters
 
 
-commands = {}
+class Value(ABC):
+
+    @abstractmethod
+    def display(self) -> None:
+        pass
+
+    @abstractmethod
+    def summary(self) -> str:
+        pass
+
+    @abstractmethod
+    def type(self) -> str:
+        pass
 
 
-def pretty_json(d):
+class History(object):
+    """Group all history objects together."""
+
+    COMMAND_HISTORY_FILE = "~/.httpsh_history"
+    PAYLOAD_HISTORY_FILE = "~/.httpsh_payload_history"
+
+    def __init__(self) -> None:
+        self.command_history = FileHistory(
+                os.path.expanduser(History.COMMAND_HISTORY_FILE))
+        self.payload_history = FileHistory(
+                os.path.expanduser(History.PAYLOAD_HISTORY_FILE))
+
+
+class Environment(object):
+    """The shell's environment."""
+
+    def __init__(self, history: History) -> None:
+        self.host = None  # type: Value
+        self.history = history
+        self.variables = {}  # type: Dict[str, Value]
+
+    def bind(self, var_name: str, value: Value) -> Value:
+        if value:
+            self.variables[var_name] = value
+        else:
+            self.variables.pop(var_name, None)
+        return value
+
+    def lookup(self, var_name: str, var_type: str=None) -> Value:
+        if var_name not in self.variables:
+            raise KeyError('no variable named: %s' % var_name)
+        var = self.variables[var_name]
+        if var_type and var.type() != var_type:
+            raise ValueError('variable: %s has type: %s not %s' % (
+                var_name, var.type(), var_type))
+        return var
+
+
+class IO(ABC):
+
+    @abstractmethod
+    def get_command(self, prompt_text: str) -> str:
+        pass
+
+    @abstractmethod
+    def get_payload(self, prompt_text: str) -> str:
+        pass
+
+    @abstractmethod
+    def display_command(self, command: str, args: Sequence[str]) -> None:
+        pass
+
+
+class Command(ABC):
+
+    def __init__(self, name: str, aliases: Sequence[str]) -> None:
+        self.name = name
+        self.aliases = aliases
+
+    @abstractmethod
+    def evaluate(self, input: IO, arguments: Sequence[str],
+                 environment: Environment) -> Value:
+        pass
+
+    def is_assignable(self) -> bool:
+        return False
+
+
+class ConsoleIO(IO):
+
+    def __init__(self, history: History) -> None:
+        self.history = history
+
+    def get_payload(self, prompt_text: str) -> str:
+        return prompt(
+                prompt_text,
+                auto_suggest=AutoSuggestFromHistory(),
+                history=self.history.payload_history).strip()
+
+    def get_command(self, prompt_text: str) -> str:
+        return prompt(
+                prompt_text,
+                auto_suggest=AutoSuggestFromHistory(),
+                history=self.history.command_history).strip()
+
+    def display_command(self, command: str, args: Sequence[str]) -> None:
+        pass
+
+
+class FileIO(IO):
+    """Reads commands from a file."""
+
+    def __init__(self, file: TextIO) -> None:
+        self.file = file
+
+    def get_command(self, prompt_text: str) -> str:
+        line = self.file.readline()
+        return line.strip() if line else None
+
+    def get_payload(self, prompt_text: str) -> str:
+        line = self.file.readline()
+        return line.strip() if line else None
+
+    def display_command(self, command: str, args: Sequence[str]) -> None:
+        print("%s>> %s %s%s" % (
+            colorama.Fore.BLUE, command,
+            ' '.join(args), colorama.Fore.RESET))
+
+
+commands = {}  # type: Dict[str, Command]
+
+
+def format_json(d: Dict) -> str:
+    """Formats a dictionary as a JSON string."""
+    return json.dumps(d, sort_keys=True, indent=3)
+
+
+def colorize_json(j: str) -> str:
+    """Adds color to a JSON string."""
+    return highlight(j, lexers.JsonLexer(), formatters.TerminalFormatter())
+
+
+def pretty_json(d: Dict) -> str:
     """returns a pretty rendition of a dictionary."""
-    return json.dumps(d, sort_keys=True, indent=4)
+    return colorize_json(format_json(d))
 
 
-def color(s):
+def style(s: str) -> str:
     return str(s) + colorama.Style.RESET_ALL
 
 
-def bold(s):
+def bold(s: str) -> str:
     return colorama.Style.BRIGHT + str(s)
 
 
-def blue(s):
+def blue(s: str) -> str:
     return colorama.Fore.BLUE + str(s)
 
 
-def red(s):
+def red(s: str) -> str:
     return colorama.Fore.RED + str(s)
 
 
-def green(s):
+def green(s: str) -> str:
     return colorama.Fore.GREEN + str(s)
 
 
@@ -53,121 +190,55 @@ def command(c):
         commands[alias] = instance
 
 
-def find_command(tokens):
-    """Looks up a command based on tokens and returns the command if it was
-    found or None if it wasn't.."""
-    if len(tokens) >= 3 and tokens[1] == '=':
-        var_name = tokens[0]
-        rvalue, args2 = find_command(tokens[2:])
-        return AssignCommand(var_name, rvalue), args2
-    elif tokens[0] in commands:
-        return commands[tokens[0]], tokens[1:]
-    else:
-        return None, tokens
-
-
-class Environment(object):
-    """The shell's environment."""
-
-    def __init__(self, history):
-        self.host = None
-        self.history = history
-        self.variables = {}
-
-    def bind(self, var_name, value):
-        if value:
-            self.variables[var_name] = value
-        else:
-            self.variables.pop(var_name, None)
-        return value
-
-    def lookup(self, var_name, var_type=None):
-        if var_name not in self.variables:
-            raise KeyError('no variable named: %s' % var_name)
-        var = self.variables[var_name]
-        if var_type and var.type() != var_type:
-            raise ValueError('variable: %s has type: %s not %s' % (
-                var_name, var.type(), var_type))
-        return var
-
-
-class History(object):
-    """Group all history objects together."""
-
-    COMMAND_HISTORY_FILE = "~/.httpsh_history"
-    PAYLOAD_HISTORY_FILE = "~/.httpsh_payload_history"
-
-    def __init__(self):
-        self.command_history = FileHistory(
-                os.path.expanduser(History.COMMAND_HISTORY_FILE))
-        self.payload_history = FileHistory(
-                os.path.expanduser(History.PAYLOAD_HISTORY_FILE))
-
-
-class Value(ABC):
-
-    @abstractmethod
-    def display(self):
-        pass
-
-    @abstractmethod
-    def summary(self):
-        pass
-
-    @abstractmethod
-    def type(self):
-        pass
-
-
 class HostValue(Value):
 
     TYPE = 'host'
 
-    def __init__(self, alias, hostname):
+    def __init__(self, alias: str, hostname: str) -> None:
         self.alias = alias
         self.hostname = hostname
-        self.headers = {}
+        self.headers = {}  # type: Dict[str, str]
 
-    def display(self):
-        print(color(bold(self.hostname)))
+    def display(self) -> None:
+        print(style(bold(self.hostname)))
         for header in sorted(self.headers.keys()):
-            print('  %s: %s' % (color(bold(header)), self.headers[header]))
+            print('  %s: %s' % (style(bold(header)), self.headers[header]))
 
-    def summary(self):
+    def summary(self) -> str:
         return "hostname = %s" % self.hostname
 
-    def type(self):
+    def type(self) -> str:
         return HostValue.TYPE
 
 
 class NullValue(Value):
 
-    def __init__(self):
+    def __init__(self) -> None:
         pass
 
-    def display(self):
+    def display(self) -> None:
         pass
 
-    def summary(self):
+    def summary(self) -> str:
         return "null"
 
-    def type(self):
+    def type(self) -> str:
         return None
 
 
 class StringValue(Value):
 
-    def __init__(self, text):
+    def __init__(self, text: str) -> None:
         self.text = text.strip()
 
-    def summary(self):
+    def summary(self) -> str:
         return self.text[:20] + ('...' if len(self.text) > 20 else '')
 
-    def display(self):
+    def display(self) -> None:
         if self.text:
             print(self.text)
 
-    def type(self):
+    def type(self) -> str:
         return 'text'
 
 
@@ -175,20 +246,20 @@ class Response(Value):
 
     TYPE = 'response'
 
-    def __init__(self, resp):
+    def __init__(self, resp) -> None:
         self.resp = resp
-        self.elapsed = None
+        self.elapsed = None  # type: datetime.timedelta
 
-    def summary(self):
+    def summary(self) -> str:
         return "status: %d, length: %d" % (
                 self.resp.status_code,
                 len(self.resp.content))
 
-    def display(self):
+    def display(self) -> None:
         self._print_resp_headers()
         if self.is_json():
             try:
-                print(json.dumps(self.resp.json(), sort_keys=True, indent=4))
+                print(pretty_json(self.resp.json()))
             except json.decoder.JSONDecodeError:
                 if self.resp.text.strip():
                     print("could not decode response as JSON: %s" %
@@ -202,29 +273,29 @@ class Response(Value):
         self._print_elapsed_time()
         sys.stdout.write('\n')
 
-    def _print_content_length(self, resp):
-        sys.stdout.write("%s bytes" % color(bold(len(resp.content))))
+    def _print_content_length(self, resp) -> None:
+        sys.stdout.write("%s bytes" % style(bold(str(len(resp.content)))))
 
-    def _print_elapsed_time(self):
+    def _print_elapsed_time(self) -> None:
         sys.stdout.write("%s seconds" %
-                         color(bold("%.3f" % self.elapsed.total_seconds())))
+                         style(bold("%.3f" % self.elapsed.total_seconds())))
 
-    def _print_resp_headers(self):
+    def _print_resp_headers(self) -> None:
         for key in sorted(self.resp.headers.keys()):
             print("%s: %s" %
-                  (color(bold(key)), self.resp.headers[key]))
+                  (style(bold(key)), self.resp.headers[key]))
 
-    def _print_status_code(self):
+    def _print_status_code(self) -> None:
         if self.resp.status_code >= 400:
-            status_code = color(red(bold(self.resp.status_code)))
+            status_code = style(red(bold(self.resp.status_code)))
         else:
-            status_code = color(green(bold(self.resp.status_code)))
+            status_code = style(green(bold(self.resp.status_code)))
         sys.stdout.write("%s" % status_code)
 
-    def type(self):
+    def type(self) -> str:
         return Response.TYPE
 
-    def is_json(self):
+    def is_json(self) -> bool:
         if 'content-type' in self.resp.headers:
             content_type = self.resp.headers['content-type'].lower()
             return (content_type.startswith('application/json') or
@@ -232,88 +303,32 @@ class Response(Value):
         else:
             return False
 
-    def json(self):
+    def json(self) -> Dict:
         return self.resp.json() if self.is_json() else None
 
 
-class IO(ABC):
-
-    @abstractmethod
-    def get_command(self, prompt_text):
-        pass
-
-    @abstractmethod
-    def get_payload(self, prompt_text):
-        pass
-
-    @abstractmethod
-    def display_command(self, command, args):
-        pass
-
-
-class ConsoleIO(IO):
-
-    def __init__(self, history):
-        self.history = history
-
-    def get_payload(self, prompt_text):
-        return prompt(
-                prompt_text,
-                auto_suggest=AutoSuggestFromHistory(),
-                history=self.history.payload_history).strip()
-
-    def get_command(self, prompt_text):
-        return prompt(
-                prompt_text,
-                auto_suggest=AutoSuggestFromHistory(),
-                history=self.history.command_history).strip()
-
-    def display_command(self, command, args):
-        pass
-
-
-class FileIO(IO):
-    """Reads commands from a file."""
-
-    def __init__(self, file):
-        self.file = file
-
-    def get_command(self, prompt_text):
-        line = self.file.readline()
-        return line.strip() if line else None
-
-    def get_payload(self, prompt_text):
-        line = self.file.readline()
-        return line.strip() if line else None
-
-    def display_command(self, command, args):
-        print("%s>> %s %s%s" % (
-            colorama.Fore.BLUE, command.name,
-            ' '.join(args), colorama.Fore.RESET))
-
-
-class Command(ABC):
-
-    def __init__(self, name, aliases):
-        self.name = name
-        self.aliases = aliases
-
-    @abstractmethod
-    def evaluate(self, input, arguments, environment):
-        pass
-
-    def is_assignable(self):
-        return False
+def find_command(tokens: Sequence[str]) -> Tuple[Command, List[str]]:
+    """Looks up a command based on tokens and returns the command if it was
+    found or None if it wasn't.."""
+    if len(tokens) >= 3 and tokens[1] == '=':
+        var_name = tokens[0]
+        rvalue, args2 = find_command(tokens[2:])
+        return AssignCommand(var_name, rvalue), args2
+    elif tokens[0] in commands:
+        return commands[tokens[0]], tokens[1:]
+    else:
+        return None, tokens
 
 
 @command
 class HelpCommand(Command):
     """displays help screen."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('help', ['?'])
 
-    def evaluate(self, input, arguments, environment):
+    def evaluate(self, input: IO, arguments: Sequence[str],
+                 environment: Environment):
         if arguments:
             # Lookup help for the specified command
             command, args = find_command(arguments)
@@ -325,11 +340,11 @@ class HelpCommand(Command):
                                   key=lambda x: x.name):
                 print(" %s" % self._format_doc_string_short(command))
 
-    def _format_doc_string_short(self, command):
+    def _format_doc_string_short(self, command: Command) -> str:
         return "%-7s - %s" % (
                 command.name, command.__doc__.split('\n')[0])
 
-    def _format_doc_string_long(self, command):
+    def _format_doc_string_long(self, command: Command) -> str:
         doc = "%s - %s" % (command.name, command.__doc__)
         if command.aliases:
             doc += '\nAliases: %s' % ', '.join(command.aliases)
@@ -346,10 +361,11 @@ For example:
     -> load ~/script
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('load', ['.', 'source', 'run'])
 
-    def evaluate(self, _, arguments, environment):
+    def evaluate(self, _, arguments: Sequence[str],
+                 environment: Environment) -> Value:
         if arguments:
             file_name = arguments[0]
             with open(os.path.expanduser(file_name), 'r') as script:
@@ -360,26 +376,29 @@ For example:
                     if not success and not result:
                         break
                 elapsed = datetime.datetime.now() - start
-                print("Script ran in: %s%.3f%s seconds" % (
+                return StringValue("Script ran in: %s%.3f%s seconds" % (
                     colorama.Style.BRIGHT, elapsed.total_seconds(),
                     colorama.Style.NORMAL))
+        else:
+            raise ValueError('usage: load SCRIPT_NAME')
 
 
 class AssignCommand(Command):
 
-    def __init__(self, var_name, command):
+    def __init__(self, var_name: str, command: Command) -> None:
         super().__init__(command.name, [])
         self.var_name = var_name
         self.command = command
 
-    def evaluate(self, input, arguments, env):
+    def evaluate(self, input, arguments: Sequence[str],
+                 env: Environment) -> Value:
         if self.command.is_assignable():
             result = self.command.evaluate(input, arguments, env)
             env.bind(self.var_name, result)
+            return result
         else:
             raise ValueError('%s commands are not assignable' %
                              self.command.name)
-        return NullValue()
 
 
 @command
@@ -394,10 +413,11 @@ For example:
     -> repeat 10 load script
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('repeat', [])
 
-    def evaluate(self, input, arguments, env):
+    def evaluate(self, input: IO, arguments: Sequence[str],
+                 env: Environment) -> Value:
         repetitions = int(arguments[0])
         command, cmd_args = find_command(arguments[1:])
         if command:
@@ -412,6 +432,8 @@ For example:
             return StringValue(
                     'Ran command: %d times.  Average time: %f seconds' % (
                         repetitions, statistics.mean(times)))
+        else:
+            raise KeyError('unknown command: %s' % arguments)
 
 
 @command
@@ -444,10 +466,11 @@ For example:
     -> select resp (totalPages).*Name
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('select', [])
 
-    def _get_resp(self, arguments, env):
+    def _get_resp(self, arguments: Sequence[Any],
+                  env: Environment) -> Response:
         if arguments:
             arg = arguments[0]
             if type(arg) == Response and arg.type() == Response.TYPE:
@@ -456,7 +479,8 @@ For example:
                 return env.lookup(arg, Response.TYPE)
         raise ValueError('could not get Response from arguments')
 
-    def evaluate(self, input, arguments, env):
+    def evaluate(self, input, arguments: Sequence[str],
+                 env: Environment) -> Value:
         resp = self._get_resp(arguments, env)
         if resp:
             # make sure that the Response contains JSON.  You can't run
@@ -471,7 +495,7 @@ For example:
         else:
             return StringValue("usage select RESPONSE [SELECT_STATEMENT]")
 
-    def _select(self, resp, select_stmt):
+    def _select(self, resp: Response, select_stmt: str) -> Value:
         """runs the select statement on a Response with a JSON payload.
 
         A select statement is a chain of expressions separated by period
@@ -479,38 +503,32 @@ For example:
         supplied JSON."""
         parts = select_stmt.split('.')
         patterns, collect = self._parse_expression(parts[0])
-        try:
-            if not patterns and collect and len(parts) >= 2:
-                result = self._select_part(
-                        resp.json(), parts[1], parts[2:], collect, {})
-            else:
-                result = self._select_part(
-                        resp.json(), parts[0], parts[1:], [], {})
-            return StringValue(pretty_json(result))
-        except KeyError as ex:
-            print('select failed (%s)' % ex)
+        if not patterns and collect and len(parts) >= 2:
+            result = self._select_part(
+                    resp.json(), parts[1], parts[2:], collect, {})
+        else:
+            result = self._select_part(
+                    resp.json(), parts[0], parts[1:], [], {})
+        return StringValue(pretty_json(result))
 
-    def _matches(self, pattern, string):
+    def _matches(self, pattern: str, string: str) -> bool:
         """determines if the pattern from the select statement matches a
         particular string.  The patterns currently only support one special
         character, the asterisk, which acts like a '.*' in the language of
         regular expressions."""
         regex_pattern = pattern.replace('*', '.*')
-        return re.match(regex_pattern, string)
+        return bool(re.match(regex_pattern, string))
 
-    def _get_matching_keys(self, node, pattern):
+    def _get_matching_keys(self, node: Mapping[str, Any],
+                           pattern: str) -> List[str]:
         """returns all keys in a dictionary that match the given pattern."""
         if type(node) == dict:
             return [key for key in node.keys()
                     if self._matches(pattern, key)]
+        return []
 
-    def _append(self, results, item):
-        if type(item) == list:
-            results.extend(item)
-        else:
-            results.append(item)
-
-    def _parse_expression(self, expression):
+    def _parse_expression(self,
+                          expression: str) -> Tuple[List[str], List[str]]:
         m = re.match('([^(]*)(\\(([^)]*)\\))?', expression)
         patterns = [pattern for pattern in m.group(1).split(',')
                     if pattern.strip()]
@@ -518,17 +536,20 @@ For example:
                    if m.group(3) else [])
         return patterns, collect
 
-    def _merge_dicts(self, collected, selected):
+    def _merge_dicts(self, collected: Dict[str, Any],
+                     selected: Mapping[str, Any]) -> Dict[str, Any]:
             collected.update(selected)
             return collected
 
-    def _verify_result(self, result):
+    def _verify_result(self, result: Dict[str, Any]) -> Dict[str, Any]:
         if not result:
             raise KeyError('could not traverse any deeper into JSON.')
         else:
             return result
 
-    def _select_part(self, node, part, parts, collect_here, collected):
+    def _select_part(self, node: Mapping[str, Any], part: str,
+                     parts: Sequence[str], collect_here: Sequence[str],
+                     collected: Dict[str, Any]) -> Any:
         patterns, collect = self._parse_expression(part)
         if type(node) == dict:
             collected.update(
@@ -564,14 +585,16 @@ For example:
 
 class HttpCommand(Command):
 
-    def __init__(self, name, aliases, method):
+    def __init__(self, name: str, aliases: Sequence[str],
+                 method: str) -> None:
         super().__init__(name, aliases)
         self.method = method
 
-    def is_assignable(self):
+    def is_assignable(self) -> bool:
         return True
 
-    def evaluate(self, input, arguments, env):
+    def evaluate(self, input: IO, arguments: Sequence[str],
+                 env: Environment) -> Value:
         if env.host:
             path = (arguments[0] if arguments else '/')
             path = ('/' + path) if not path.startswith('/') else path
@@ -593,7 +616,7 @@ class HttpCommand(Command):
         else:
             return StringValue('please specify a host.')
 
-    def get_payload(self, input, env):
+    def get_payload(self, input: IO, env: Environment) -> str:
         return None
 
 
@@ -606,7 +629,7 @@ For example:
     -> head /customers
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('head', ['HEAD'], 'head')
 
 
@@ -619,7 +642,7 @@ For example:
     -> options /customers
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('options', ['OPTIONS', 'opt'], 'options')
 
 
@@ -632,16 +655,17 @@ For example:
     -> get /customers
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('get', ['GET', 'g'], 'get')
 
 
 class PayloadCommand(HttpCommand):
 
-    def __init__(self, name, aliases, method):
+    def __init__(self, name: str, aliases: Sequence[str],
+                 method: str) -> None:
         super().__init__(name, aliases, method)
 
-    def get_payload(self, input, env):
+    def get_payload(self, input: IO, env: Environment) -> str:
         payload = input.get_payload('Enter Payload: ')
         json_payload = json.loads(payload)
         return json_payload
@@ -656,7 +680,7 @@ For example:
     -> put /customers
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('put', ['PUT', 'pu'], 'put')
 
 
@@ -669,7 +693,7 @@ For example:
     -> post /customers
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('post', ['POST', 'po'], 'post')
 
 
@@ -685,7 +709,7 @@ Note: If you're wondering who would ever have a service where a GET request
 sent a payload, check out ElasticSearch.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('getp', ['GETP', 'gp'], 'get')
 
 
@@ -698,7 +722,7 @@ For example:
     -> patch /customers
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('patch', ['pat'], 'patch')
 
 
@@ -711,7 +735,7 @@ For example:
     -> delete /customers
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('delete', ['del'], 'delete')
 
 
@@ -719,10 +743,11 @@ For example:
 class HeadersCommand(Command):
     """shows the current list of headers."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('headers', ['hs'])
 
-    def evaluate(self, input, args, env):
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment) -> Value:
         if not env.host:
             return StringValue('no host defined')
         if len(args) == 0:
@@ -730,11 +755,11 @@ class HeadersCommand(Command):
         else:
             return StringValue('headers has no arguments')
 
-    def _format_header(self, key, value):
+    def _format_header(self, key: str, value: str) -> str:
         return ("%s%s: %s%s" % (
             colorama.Style.BRIGHT, key, value, colorama.Style.NORMAL))
 
-    def _get_headers(self, env):
+    def _get_headers(self, env: Environment) -> str:
         if env.host:
             return '\n'.join(
                     self._format_header(key, env.host.headers[key])
@@ -749,20 +774,22 @@ class HostsCommand(Command):
 
     The current host is prefixed by an asterisk."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('hosts', [])
 
-    def evaluate(self, input, args, env):
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment) -> Value:
         if len(args) == 0:
             return StringValue(self._get_hosts(env))
         else:
             return StringValue('hosts has no arguments')
 
-    def _format_host(self, var_name, host, current_host):
+    def _format_host(self, var_name: str, host: HostValue,
+                     current_host: HostValue) -> str:
         return ("%s%s: %s" % ('*' if host == current_host else ' ',
                               var_name, host.hostname))
 
-    def _get_hosts(self, env):
+    def _get_hosts(self, env: Environment) -> str:
         return '\n'.join(
                 self._format_host(
                     var_name, env.variables[var_name], env.host)
@@ -780,10 +807,11 @@ For example:
     -> header accept application/json
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('header', ['hd'])
 
-    def evaluate(self, input, args, env):
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment) -> Value:
         if not env.host:
             return StringValue('no host defined')
         if len(args) == 1:
@@ -802,10 +830,11 @@ For example:
 class TypeCommand(Command):
     """displays the type of a variable."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('type', ['t'])
 
-    def evaluate(self, input, args, env):
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment) -> Value:
         if args:
             try:
                 return StringValue(env.lookup(args[0]).type())
@@ -819,10 +848,11 @@ class TypeCommand(Command):
 class EnvCommand(Command):
     """displays the environment."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('env', [])
 
-    def evaluate(self, input, args, env):
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment) -> Value:
         result = ''
         # Add host
         result += bold('host: ')
@@ -854,10 +884,11 @@ For example:
     -> rm host1
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('remove', ['rm'])
 
-    def evaluate(self, input, args, env):
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment) -> Value:
         if len(args) != 1:
             return StringValue('usage remove VARNAME')
         result = env.variables.pop(args[0], None)
@@ -880,10 +911,11 @@ For example:
     -> ls
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('vars', ['ls'])
 
-    def evaluate(self, input, args, env):
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment) -> Value:
         result = ''
         result += '\n'.join(
             ["%s = %s { %s }" % (
@@ -913,10 +945,11 @@ For example:
     -> host NAME
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__('host', ['h'])
 
-    def evaluate(self, input, args, env):
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment) -> Value:
         try:
             if len(args) == 1:
                 # select named Host
@@ -932,9 +965,9 @@ For example:
             else:
                 return StringValue("no current host. try: host HOSTNAME")
         except ValueError as ex:
-            print('could not switch to host: %s' % ex)
+            raise ValueError('could not switch to host: %s' % ex)
 
-    def _get_host(self, host):
+    def _get_host(self, host: str) -> str:
         if not host.startswith('http'):
             completer = WordCompleter(['http', 'https'])
             text = prompt('Enter Schema [http/HTTPS]: ',
@@ -943,7 +976,7 @@ For example:
         return host
 
 
-def read_command(line):
+def read_command(line) -> Tuple[Command, List[str]]:
     """Reads a command from a string and returns it."""
     if line.strip():
         return find_command(line.split(' '))
@@ -951,16 +984,17 @@ def read_command(line):
         return None, line
 
 
-def evaluate_command(command, input, args, env):
+def evaluate_command(command, input: IO, args: Sequence[str],
+                     env: Environment) -> Value:
     """evaluates a command in an environment."""
     return command.evaluate(input, args, env)
 
 
-def print_command_result(result):
+def print_command_result(result: Value) -> None:
     result.display()
 
 
-def read_eval_print(input, env):
+def read_eval_print(input: IO, env: Environment) -> Tuple[bool, str]:
     """Reads from input until it receives a line of text.  When a line has been
     received, the line is evaluated as a command and then the result of the
     evaluation is printed.
@@ -975,7 +1009,7 @@ def read_eval_print(input, env):
             break
     command, args = read_command(line)
     if command:
-        input.display_command(command, args)
+        input.display_command(command.name, args)
         result = evaluate_command(command, input, args, env)
         if result:
             print_command_result(result)
@@ -984,7 +1018,7 @@ def read_eval_print(input, env):
         return False, line
 
 
-def main():
+def main() -> None:
     colorama.init()
     env = Environment(History())
     console = ConsoleIO(env.history)

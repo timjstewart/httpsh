@@ -13,7 +13,3 @@ select lial  hits.hits._source
 host dogs
 pugs = get /dogs?breed=Pug
 select pugs content.breed
-
-# Cleanup
-rm dogs
-rm es
