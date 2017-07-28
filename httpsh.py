@@ -363,17 +363,17 @@ class HelpCommand(Command):
 
 
 @command
-class LoadCommand(Command):
-    """loads a file and evaluates commands from it.
+class RunCommand(Command):
+    """evaluates commands stored in a file.
 
 For example:
 
-    -> load script
-    -> load ~/script
+    -> run script
+    -> run ~/script
     """
 
     def __init__(self) -> None:
-        super().__init__('load', ['.', 'source', 'run'])
+        super().__init__('run', ['.', 'source'])
 
     def evaluate(self, _, arguments: Sequence[str],
                  environment: Environment,
@@ -392,7 +392,7 @@ For example:
                     colorama.Style.BRIGHT, elapsed.total_seconds(),
                     colorama.Style.NORMAL))
         else:
-            raise ValueError('usage: load SCRIPT_NAME')
+            raise ValueError('usage: run SCRIPT_NAME')
 
 
 class AssignCommand(Command):
@@ -423,7 +423,7 @@ There is no delay between repetitions.
 For example:
 
     -> repeat 100 get /customers
-    -> repeat 10 load script
+    -> repeat 10 run script
     """
 
     def __init__(self) -> None:
@@ -486,6 +486,10 @@ For example:
     def _get_resp(self, arguments: Sequence[Any],
                   value: Optional[Value],
                   env: Environment) -> Tuple[Response, Sequence[str]]:
+        """Returns the Response object to run the select command on.
+        That object can either be directly passed as the value parameter
+        or it can be passed as a name of a variable presumably containing
+        a Response value."""
         if isinstance(value, Response):
             return value, arguments
         if arguments:

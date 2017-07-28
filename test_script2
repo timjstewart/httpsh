@@ -6,7 +6,7 @@ header accept application/json
 
 # Comment
 host es
-lial = get /objective2/objective/_search?q=book_title:Lial 
+lial = get /objective2/objective/_search?q=book_title:Lial
 select lial hits.hits._source
 resp = get /objective2/objective/_search?q=book_title:Lial  | hits.hits._source
 
