@@ -5,7 +5,7 @@ import re
 import requests
 import statistics
 import sys
-from io import TextIO
+from io import StringIO
 
 from abc import ABC, abstractmethod
 from typing import Dict, Tuple, Sequence, Any, Mapping, List
@@ -126,7 +126,7 @@ class ConsoleIO(IO):
 class FileIO(IO):
     """Reads commands from a file."""
 
-    def __init__(self, file: TextIO) -> None:
+    def __init__(self, file: StringIO) -> None:
         self.file = file
 
     def get_command(self, prompt_text: str) -> str:
