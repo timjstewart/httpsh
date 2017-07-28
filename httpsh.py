@@ -1,3 +1,4 @@
+import copy
 import datetime
 import itertools
 import json
@@ -31,6 +32,7 @@ class Category(object):
     ENVIRONMENT = 'environment'
     HOSTS = 'hosts'
     MISC = 'misc'
+    HTTP = 'HTTP'
     REQUESTS = 'requests'
 
 
@@ -235,6 +237,7 @@ def command(command_class):
     commands[cmd.name] = aliased_commands[cmd.name] = cmd
     for alias in cmd.aliases:
         aliased_commands[alias] = cmd
+    return command_class
 
 
 class NullValue(Value):
@@ -423,7 +426,7 @@ class HelpCommand(Command):
         return NullValue()
 
     def _format_doc_string_short(self, command: Command) -> str:
-        return "%-7s - %s" % (
+        return "%-8s - %s" % (
                 command.name, command.__doc__.split('\n')[0])
 
     def _format_doc_string_long(self, command: Command) -> str:
@@ -684,7 +687,7 @@ class HttpCommand(Command):
 
     def __init__(self, name: str, aliases: Sequence[str],
                  method: str) -> None:
-        super().__init__(name, aliases, category=Category.REQUESTS)
+        super().__init__(name, aliases, category=Category.HTTP)
         self.method = method
 
     def is_assignable(self) -> bool:
@@ -753,7 +756,7 @@ class Request(Value):
 
     def __init__(self, host: Host, command: HttpCommand,
                  path: str) -> None:
-        self.host = host
+        self.host = copy.deepcopy(host)
         self.command = command
         self.path = path
 
@@ -763,8 +766,8 @@ class Request(Value):
         print(style(bold('Path: ')) + self.path)
 
     def summary(self) -> str:
-        return "{ method: %s, host: %s, path: %s }" % (
-                self.command.method, self.host.hostname, self.path)
+        return "method: %s, host: %s, path: %s" % (
+                self.command.method.upper(), self.host.hostname, self.path)
 
     def type(self) -> str:
         return Request.TYPE
@@ -772,10 +775,16 @@ class Request(Value):
 
 @command
 class RequestCommand(Command):
-    """creates an HTTP request that can be run multiple times"""
+    """creates an HTTP request that can be run multiple times.
+
+Example:
+
+    -> request get /dogs
+    -> get_dogs = request get /dogs
+    """
 
     def __init__(self) -> None:
-        super().__init__('request', [])
+        super().__init__('request', ['@'], category=Category.REQUESTS)
 
     def is_assignable(self) -> bool:
         return True
@@ -798,13 +807,21 @@ class SendCommand(Command):
 
 Example:
 
+    # A little setup first...
     -> req = get /dogs?breed=Pug
+
+    # Send the request.
     -> send req
+
+    # Send the request again.
     -> send req
+
+    # Send the request and filter it through a select statement.
+    -> send req | content.breed
     """
 
     def __init__(self) -> None:
-        super().__init__('send', [])
+        super().__init__('send', ['!'], category=Category.REQUESTS)
 
     def is_assignable(self) -> bool:
         return True
@@ -1168,8 +1185,11 @@ For example:
     -> ls
     """
 
-    def __init__(self) -> None:
-        super().__init__('vars', ['ls'], category=Category.ENVIRONMENT)
+    def __init__(self, name: str = 'vars', aliases: Sequence[str] = None,
+            var_type: str=None, category: str=Category.ENVIRONMENT) -> None:
+        super().__init__(name, aliases or ['ls'],
+                         category=category)
+        self.var_type = var_type
 
     def evaluate(self, input: IO, args: Sequence[str],
                  env: Environment,
@@ -1180,8 +1200,23 @@ For example:
                 style(bold(name)),
                 env.variables[name].type(),
                 env.variables[name].summary())
-                for name in sorted(env.variables.keys())])
+                for name in sorted(env.variables.keys())
+                if env.lookup(name).type() == self.var_type])
         return StringValue(result)
+
+
+@command
+class RequestsCommand(VarsCommand):
+    """displays the requests that have been defined.
+
+For example:
+
+    -> requests
+    """
+
+    def __init__(self) -> None:
+        super().__init__('requests', [],
+                         category=Category.REQUESTS, var_type=Request.TYPE)
 
 
 @command

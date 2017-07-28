@@ -1,8 +1,9 @@
 # Comment
 host es http://localhost:9200
-header accept application/json
+header Accept application/json
+
 host dogs http://localhost:8080
-header accept application/json
+header Accept application/json
 
 # Comment
 host es
@@ -14,3 +15,9 @@ resp = get /objective2/objective/_search?q=book_title:Lial  | hits.hits._source
 host dogs
 pugs = get /dogs?breed=Pug
 select pugs content.breed
+
+host dogs
+get_pugs = request get /dogs?breed=Pug
+get_yorkies = request get /dogs?breed=Yorkie
+
+send get_pugs | content.breed,name
