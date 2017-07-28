@@ -49,9 +49,6 @@ class Value(ABC):
         pass
 
 
-ValueOrStr = Union[str, Value]
-
-
 class History(object):
     """Group all history objects together."""
 
@@ -419,9 +416,10 @@ class HelpCommand(Command):
             print("The following are commands that you can enter in " +
                   "the shell, grouped by category:\n")
             for group in grouped:
-                print(style(bold(group[0])))
+                print(style(bold(group[0] + ':')))
                 for command in sorted(group[1], key=lambda x: x.name):
                     print("  %s" % self._format_doc_string_short(command))
+                print()
         return NullValue()
 
     def _format_doc_string_short(self, command: Command) -> str:
@@ -615,7 +613,7 @@ For example:
         particular string.  The patterns currently only support one special
         character, the asterisk, which acts like a '.*' in the language of
         regular expressions."""
-        regex_pattern = pattern.replace('*', '.*')
+        regex_pattern = '^' + pattern.replace('*', '.*') + '$'
         return bool(re.match(regex_pattern, string))
 
     def _get_matching_keys(self, node: Mapping[str, Any],
@@ -721,15 +719,17 @@ class HttpCommand(Command):
 
     def evaluate(self, input: IO, arguments: Sequence[str],
                  env: Environment,
-                 value: Optional[Value] = None) -> Value:
-        if env.host:
+                 value: Optional[Value] = None,
+                 host: Optional[Host] = None) -> Value:
+        host = host or env.host
+        if host:
             path = (arguments[0] if arguments else '/')
             path = ('/' + path) if not path.startswith('/') else path
             start = datetime.datetime.now()
             resp = Response(requests.request(
                     self.method,
-                    env.host.hostname + path,
-                    headers=env.host.headers,
+                    host.hostname + path,
+                    headers=host.headers,
                     json=self.get_payload(input, env)))
             resp.elapsed = datetime.datetime.now() - start
 
@@ -745,6 +745,97 @@ class HttpCommand(Command):
 
     def get_payload(self, input: IO, env: Environment) -> str:
         return None
+
+
+class Request(Value):
+
+    TYPE = 'request'
+
+    def __init__(self, host: Host, command: HttpCommand,
+                 path: str) -> None:
+        self.host = host
+        self.command = command
+        self.path = path
+
+    def display(self) -> None:
+        print(style(bold('%s Request:' % self.command.method.upper())))
+        self.host.display()
+        print(style(bold('Path: ')) + self.path)
+
+    def summary(self) -> str:
+        return "{ method: %s, host: %s, path: %s }" % (
+                self.command.method, self.host.hostname, self.path)
+
+    def type(self) -> str:
+        return Request.TYPE
+
+
+@command
+class RequestCommand(Command):
+    """creates an HTTP request that can be run multiple times"""
+
+    def __init__(self) -> None:
+        super().__init__('request', [])
+
+    def is_assignable(self) -> bool:
+        return True
+
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
+        if not env.host:
+            raise ValueError("no host.  try 'help host'")
+        command, cmd_args = find_command(args)
+        if isinstance(command, HttpCommand):
+            return Request(env.host, command, cmd_args[0])
+        return ErrorString("'%s' is not an HTTP command (e.g. get, post)" %
+                           ' '.join(args))
+
+
+@command
+class SendCommand(Command):
+    """sends a request and prints its results.
+
+Example:
+
+    -> req = get /dogs?breed=Pug
+    -> send req
+    -> send req
+    """
+
+    def __init__(self) -> None:
+        super().__init__('send', [])
+
+    def is_assignable(self) -> bool:
+        return True
+
+    def _get_request(self, args: Sequence[str], value: Optional[Value],
+                     env: Environment) -> Optional[Request]:
+        if isinstance(value, Request):
+            return cast(Request, value)
+        elif args:
+            value = env.lookup(args[0])
+            if not value:
+                raise KeyError("no variable named: %s" % args[0])
+            elif not isinstance(value, Request):
+                raise ValueError("'%s' is not a Request" % args[0])
+            else:
+                return cast(Request, value)
+        raise ValueError("usage: send VAR")
+
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
+        request = self._get_request(args, value, env)
+        value = request.command.evaluate(input, [request.path],
+                                         env, host=request.host)
+        if value and len(args) > 2 and args[1] == '|':
+            # filter the HTTP response through a select statement
+            select_stmt = args[2]
+            return aliased_commands['select'].evaluate(
+                    input, [select_stmt], env, value=value)
+        else:
+            return value
 
 
 @command
@@ -1254,7 +1345,7 @@ def main() -> None:
         except EOFError:
             break
         except:
-            # Give me some information about unexpected errors.
+            # print some information about unexpected errors.
             import traceback
             traceback.print_exc()
 
