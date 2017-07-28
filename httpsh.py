@@ -671,6 +671,30 @@ class HttpCommand(Command):
     def is_assignable(self) -> bool:
         return True
 
+    def to_curl_command(self, input: IO, arguments: Sequence[str],
+                        env: Environment) -> str:
+        if env.host:
+            command = 'curl -X'
+            command += self.method.upper()
+            command += ' '
+            # host
+            command += '"' + env.host.hostname
+            if arguments:
+                if not arguments[0].startswith('/'):
+                    command += '/'
+                command += arguments[0]
+            command += '"'
+            # Headers
+            for name, value in env.host.headers.items():
+                command += " -H '%s: %s'" % (name, value)
+            # Payload if provided
+            payload = self.get_payload(input, env)
+            if payload:
+                command += " -d '" + json.dumps(payload) + "'"
+            return command
+        else:
+            raise ValueError("no host.  try 'help host'")
+
     def evaluate(self, input: IO, arguments: Sequence[str],
                  env: Environment,
                  value: Optional[Value] = None) -> Value:
@@ -697,6 +721,28 @@ class HttpCommand(Command):
 
     def get_payload(self, input: IO, env: Environment) -> str:
         return None
+
+
+@command
+class CurlCommand(Command):
+    """sends a HEAD request using the current value of host and headers.
+
+For example:
+
+    -> head /customers
+    """
+
+    def __init__(self) -> None:
+        super().__init__('curl', ['HEAD'])
+
+    def evaluate(self, input: IO, args: Sequence[str],
+                 env: Environment,
+                 value: Optional[Value] = None) -> Value:
+        command, cmd_args = find_command(args)
+        if isinstance(command, HttpCommand):
+            return StringValue(command.to_curl_command(input, cmd_args, env))
+        return ErrorString("'%s' is not an HTTP command (e.g. get, post)" %
+                           ' '.join(args))
 
 
 @command
@@ -829,7 +875,7 @@ class HeadersCommand(Command):
                  env: Environment,
                  value: Optional[Value] = None) -> Value:
         if not env.host:
-            return ErrorString('no host defined')
+            return ErrorString("no host.  try 'help host'")
         if len(args) == 0:
             return StringValue(self._get_headers(env))
         else:
@@ -896,7 +942,7 @@ For example:
                  env: Environment,
                  value: Optional[Value] = None) -> Value:
         if not env.host:
-            return ErrorString('no host defined')
+            return ErrorString("no host.  try 'help host'")
         if len(args) == 1:
             try:
                 return StringValue(env.host.headers[args[0]])
