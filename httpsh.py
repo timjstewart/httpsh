@@ -1359,6 +1359,12 @@ def help_and_exit(console: IO, env: Environment) -> None:
     sys.exit(0)
 
 
+def run_startup_script(env: Environment) -> None:
+    startup_script = os.path.expanduser('~/.httpshrc')
+    if os.path.exists(startup_script):
+        commands['run'].evaluate(None, [startup_script], env)
+
+
 def main() -> None:
     colorama.init()
     env = Environment(History())
@@ -1368,6 +1374,7 @@ def main() -> None:
     if should_show_help():
         help_and_exit(console, env)
     print(banner())
+    run_startup_script(env)
     while True:
         try:
             success, result = read_eval_print(console, env)

@@ -5,12 +5,6 @@ header Accept application/json
 host dogs http://localhost:8080
 header Accept application/json
 
-# Get Recommendation
-host es
-rec = request POST suggest1/_search?pretty&filter_path=suggest.exercise-suggest.options._source.exercise_text
-{ "suggest": { "exercise-suggest": { "prefix": "If a c", "completion": { "field": "exercise_text_comp" } } } }
-send rec
-
 # Comment
 host es
 lial = get /objective2/objective/_search?q=book_title:Lial
@@ -27,3 +21,13 @@ get_pugs = request get /dogs?breed=Pug
 get_yorkies = request get /dogs?breed=Yorkie
 
 send get_pugs | content.breed,name
+
+# Get Recommendation
+host es
+rec = request POST suggest1/_search?pretty&filter_path=suggest.exercise-suggest.options._source.exercise_text
+{ "suggest": { "exercise-suggest": { "prefix": "If a c", "completion": { "field": "exercise_text_comp" } } } }
+send rec
+
+search = request get /objective2/objective/_search?q=book_title:Lial
+send search
+
