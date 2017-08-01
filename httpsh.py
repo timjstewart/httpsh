@@ -126,7 +126,7 @@ class IO(ABC):
         pass
 
     @abstractmethod
-    def get_payload(self, prompt_text: str) -> str:
+    def get_payload(self, prompt_text: str) -> JsonValue:
         pass
 
     @abstractmethod
@@ -157,11 +157,11 @@ class ConsoleIO(IO):
     def __init__(self, env: Environment) -> None:
         self.env = env
 
-    def get_payload(self, prompt_text: str) -> str:
-        return prompt(
+    def get_payload(self, prompt_text: str) -> JsonValue:
+        return json.loads(prompt(
                 prompt_text,
                 auto_suggest=AutoSuggestFromHistory(),
-                history=self.env.history.payload_history).strip()
+                history=self.env.history.payload_history).strip())
 
     def get_command(self, prompt_text: str) -> str:
         return prompt(
@@ -183,9 +183,9 @@ class FileIO(IO):
         line = self.file.readline()
         return line.strip() if line else None
 
-    def get_payload(self, prompt_text: str) -> str:
+    def get_payload(self, prompt_text: str) -> JsonValue:
         line = self.file.readline()
-        return line.strip() if line else None
+        return json.loads(line.strip()) if line else None
 
     def display_command(self, command: str, args: Sequence[str]) -> None:
         print(style(blue(">> %s %s" % (command, ' '.join(args)))))
@@ -723,7 +723,8 @@ class HttpCommand(Command):
     def evaluate(self, input: IO, arguments: Sequence[str],
                  env: Environment,
                  value: Optional[Value] = None,
-                 host: Optional[Host] = None) -> Value:
+                 host: Optional[Host] = None,
+                 payload: JsonValue = None) -> Value:
         host = host or env.host
         if host:
             path = (arguments[0] if arguments else '/')
@@ -733,7 +734,7 @@ class HttpCommand(Command):
                     self.method,
                     host.hostname + path,
                     headers=host.headers,
-                    json=self.get_payload(input, env)))
+                    json=payload or self.get_payload(input, env)))
             resp.elapsed = datetime.datetime.now() - start
 
             if len(arguments) > 2 and arguments[1] == '|':
@@ -746,8 +747,8 @@ class HttpCommand(Command):
         else:
             return ErrorString('please specify a host.')
 
-    def get_payload(self, input: IO, env: Environment) -> str:
-        return None
+    def get_payload(self, input: IO, env: Environment) -> JsonValue:
+        pass
 
 
 class Request(Value):
@@ -755,15 +756,18 @@ class Request(Value):
     TYPE = 'request'
 
     def __init__(self, host: Host, command: HttpCommand,
-                 path: str) -> None:
+                 path: str, payload: str = None) -> None:
         self.host = copy.deepcopy(host)
         self.command = command
         self.path = path
+        self.payload = payload
 
     def display(self) -> None:
         print(style(bold('%s Request:' % self.command.method.upper())))
         self.host.display()
         print(style(bold('Path: ')) + self.path)
+        if self.payload:
+            print(style(bold('Payload: ')) + json.dumps(self.payload))
 
     def summary(self) -> str:
         return "method: %s, host: %s, path: %s" % (
@@ -795,6 +799,9 @@ Example:
         if not env.host:
             raise ValueError("no host.  try 'help host'")
         command, cmd_args = find_command(args)
+        if isinstance(command, PayloadCommand):
+            return Request(env.host, command, cmd_args[0],
+                           payload=input.get_payload('Enter Payload: '))
         if isinstance(command, HttpCommand):
             return Request(env.host, command, cmd_args[0])
         return ErrorString("'%s' is not an HTTP command (e.g. get, post)" %
@@ -845,7 +852,8 @@ Example:
                  value: Optional[Value] = None) -> Value:
         request = self._get_request(args, value, env)
         value = request.command.evaluate(input, [request.path],
-                                         env, host=request.host)
+                                         env, host=request.host,
+                                         payload=request.payload)
         if value and len(args) > 2 and args[1] == '|':
             # filter the HTTP response through a select statement
             select_stmt = args[2]
@@ -925,10 +933,8 @@ class PayloadCommand(HttpCommand):
                  method: str) -> None:
         super().__init__(name, aliases, method)
 
-    def get_payload(self, input: IO, env: Environment) -> str:
-        payload = input.get_payload('Enter Payload: ')
-        json_payload = json.loads(payload)
-        return json_payload
+    def get_payload(self, input: IO, env: Environment) -> JsonValue:
+        return input.get_payload('Enter Payload: ')
 
 
 @command
@@ -1379,6 +1385,8 @@ def main() -> None:
             print(ErrorString(ex.args[0]))
         except EOFError:
             break
+        except requests.exceptions.ConnectionError as ex:
+            print(ErrorString(str(ex)))
         except:
             # print some information about unexpected errors.
             import traceback
